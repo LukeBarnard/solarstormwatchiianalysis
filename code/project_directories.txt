@@ -1,0 +1,9 @@
+code,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\code
+figs,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\figures
+data,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data
+classsifications,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-classifications.csv
+subjects,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-classifications.csv
+workflows,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-classifications.csv
+workflow_contenst,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-classifications.csv
+out_data,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\out_data
+hi_data,E:\STEREO\ares.nrl.navy.mil\lz
