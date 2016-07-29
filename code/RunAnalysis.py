@@ -1,8 +1,8 @@
 import SolarStormwatchIIAnalysis as ssw
 
 def main():
-    data = ssw.import_classifications(latest=True, version=27.17)
-    print data
+    ssw.create_classification_frame_matched_hdf5(active=True, latest=True)
+    ssw.test_plot()
     return
 
 if __name__ == "__main__":
