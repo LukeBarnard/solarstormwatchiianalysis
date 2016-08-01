@@ -6,7 +6,7 @@ import simplejson as json
 import h5py
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-
+import scipy.stats as stats
 
 def get_project_dirs():
     """
@@ -218,6 +218,7 @@ def create_classification_frame_matched_hdf5(active=True, latest=True):
 
     project_dirs = get_project_dirs()
 
+    # Get classifications from latest workflow
     classifications = import_classifications(latest=latest)
     # Only import currently active subjects
     subjects = import_subjects(active=active)
@@ -260,14 +261,16 @@ def create_classification_frame_matched_hdf5(active=True, latest=True):
 
                 # Make a branch for this image type / asset time.
                 branch = "/".join([info['img_type'], timestr])
-                #print branch
+                print branch
                 grp_asset = grp_set.create_group(branch)
 
                 # Loop over the classifications to pull out the annotations for this asset.
                 all_x_pix = []
                 all_y_pix = []
                 all_user = []
-                for j, (idc, cla) in enumerate(clas_subset.iterrows()):
+                # Counter for the number of submissions on this asset
+                submission_count = 0
+                for idc, cla in clas_subset.iterrows():
 
                     # Get the annotation
                     cla_anno = json.loads(cla['annotations'])[0]
@@ -281,8 +284,8 @@ def create_classification_frame_matched_hdf5(active=True, latest=True):
                             user_y_pix = [int(p['y']) for p in val['points']]
                             user_id = cla['user_id']
                             # Set up a group for this user.
-                            branch = "users/user_{}".format(j)
-                            #print "---->" + branch
+                            branch = "users/user_{}".format(submission_count)
+                            print "---->" + branch
                             grp_user = grp_asset.create_group(branch)
                             # Assign the user data to their group
                             grp_user.create_dataset('x_pix', data=np.array(user_x_pix, dtype=int))
@@ -292,6 +295,7 @@ def create_classification_frame_matched_hdf5(active=True, latest=True):
                             all_x_pix.extend(user_x_pix)
                             all_y_pix.extend(user_y_pix)
                             all_user.append(user_id)
+                            submission_count += 1
 
                 # Now add on the collected annotation to the assets group.
                 grp_asset.create_dataset('x_pix', data=np.array(all_x_pix, dtype=int))
@@ -332,3 +336,133 @@ def test_plot():
         name = os.path.join(project_dirs['figs'], grp.attrs['craft']+'_test.jpg')
         plt.savefig(name)
 
+def test_animation():
+    """
+    A function to load in the test version of the HDF5 stormwatch data and produce a test animation.
+    :return:
+    """
+    project_dirs = get_project_dirs()
+    out_hdf5_name = os.path.join(project_dirs['out_data'], 'out_data.hdf5')
+
+    hdf = h5py.File(out_hdf5_name, "r")
+
+    for grp in hdf.values():
+        norm = grp['norm']
+        diff = grp['diff']
+        fig, ax = plt.subplots(1, 2, figsize=(15, 7))
+        im_count = 0
+        # Get time lims.
+        cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
+        cmap = mpl.cm.viridis
+        c = 0
+        craft = grp.attrs['craft']
+        for norm_t, diff_t in zip(norm.itervalues(),diff.itervalues()):
+            ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
+            ax[0].set_title("Tracked in {0} {1} image".format('craft', 'norm'))
+
+            ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
+            ax[1].set_title("Tracked in {0} {1} image".format('craft', 'diff'))
+            c += 1
+
+            for a in ax:
+                a.set_xlim(0, 1023)
+                a.set_ylim(0, 1023)
+                a.set_aspect('equal')
+
+            plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
+            name = os.path.join(project_dirs['figs'], grp.attrs['craft']+"_ani_f{0:03d}.jpg".format(im_count))
+            print name
+            plt.savefig(name)
+            im_count += 1
+        plt.close('all')
+
+    # Make animation and clean up.
+    for craft in ['sta', 'stb']:
+        src = os.path.join(project_dirs['figs'], craft + "*_ani*.jpg")
+        dst = os.path.join(project_dirs['figs'], craft + "_front_id_test.gif")
+        cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
+        os.system(cmd)
+        # Tidy.
+        files = glob.glob(src)
+        for f in files:
+            os.remove(f)
+
+
+def test_front_density():
+    """
+    A function to load in the test version of the HDF5 stormwatch data and produce a test animation.
+    :return:
+    """
+    project_dirs = get_project_dirs()
+    out_hdf5_name = os.path.join(project_dirs['out_data'], 'out_data.hdf5')
+
+    hdf = h5py.File(out_hdf5_name, "r")
+
+    for grp in hdf.values():
+        norm = grp['norm']
+        diff = grp['diff']
+        im_count = 0
+        # Get time lims.
+        cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
+        cmap = mpl.cm.viridis
+        cmap.set_bad(color='k')
+        c = 0
+        craft = grp.attrs['craft']
+
+        x = np.arange(0, 1023)
+        y = np.arange(0, 1023)
+        xm, ym = np.meshgrid(x, y)
+        positions = np.vstack([xm.ravel(), ym.ravel()])
+
+        for norm_t, diff_t in zip(norm.itervalues(),diff.itervalues()):
+
+            plot_front = False
+            if (len(norm_t['x_pix'])>5) & (len(diff_t['x_pix'])>5):
+                plot_front = True
+                values = np.vstack([norm_t['x_pix'], norm_t['y_pix']])
+                norm_kernel = stats.gaussian_kde(values)
+
+                values = np.vstack([diff_t['x_pix'], diff_t['y_pix']])
+                diff_kernel = stats.gaussian_kde(values)
+
+                norm_cme_loc = np.reshape(norm_kernel(positions).T, xm.shape)
+                diff_cme_loc = np.reshape(diff_kernel(positions).T, xm.shape)
+
+            ###########################################################################
+            fig, ax = plt.subplots(1, 2, figsize=(14, 7.05))
+            if plot_front:
+                q = np.percentile(norm_cme_loc, [90, 92.5, 95, 97.5, 100])
+                ax[0].contourf(xm, ym, norm_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
+                q = np.percentile(diff_cme_loc, [90, 92.5, 95, 97.5, 100])
+                ax[1].contourf(xm, ym, diff_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
+
+            ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color='r')
+            ax[0].set_title("Tracked in {0} {1} image".format('craft', 'norm'))
+
+            ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color='r')
+            ax[1].set_title("Tracked in {0} {1} image".format('craft', 'diff'))
+            c += 1
+
+            for a in ax:
+                a.set_xlim(0, 1023)
+                a.set_ylim(0, 1023)
+                a.set_aspect('equal')
+
+            plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
+            name = os.path.join(project_dirs['figs'], grp.attrs['craft']+"_ani_CME_density_f{0:03d}.jpg".format(im_count))
+            print name
+            plt.savefig(name)
+            plt.close('all')
+            im_count += 1
+
+
+    # Make animation and clean up.
+    for craft in ['sta', 'stb']:
+        src = os.path.join(project_dirs['figs'], craft + "*_ani_CME_density*.jpg")
+        dst = os.path.join(project_dirs['figs'], craft + "_front_density_test.gif")
+        cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
+        os.system(cmd)
+        # Tidy.
+        files = glob.glob(src)
+        for f in files:
+            os.remove(f)
