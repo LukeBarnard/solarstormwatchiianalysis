@@ -8,6 +8,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import scipy.stats as stats
 
+
 def get_project_dirs():
     """
     A function to load in dictionary of project directories stored in a config.txt file stored in the
@@ -55,7 +56,7 @@ def import_classifications(latest=True, version=None):
         print("Error: latest should be type bool. Defaulting to True")
         latest = True
 
-    if not version is None:
+    if version is not None:
         # Version not none, so should be float.
         if not isinstance(version, float):
             print("Error, version ({}) should be None or a float. Defaulting to None.".format(version))
@@ -66,17 +67,24 @@ def import_classifications(latest=True, version=None):
     # Get converters for each column:
     converters = dict(classification_id=int, user_name=str, user_id=int, user_ip=str, workflow_id=int,
                       workflow_name=str, workflow_version=float, created_at=str, gold_standard=str, expert=str,
-                      metadata=str, annotations=str, subject_data=str, subject_ids=str)
+                      metadata=json.loads, annotations=json.loads, subject_data=json.loads, subject_ids=str)
     # Load the classifications into DataFrame and get latest subset if needed.
     data = pd.read_csv(project_dirs['classifications'], converters=converters)
+
     # Convert the subject ids, which are a variable length list of subject_ids. Because of setup of workflow
     # these numbers just repeat. Only need first.
+    # Also, the json annotations are buried in a list, but only the dictionary in element 0 is needed. So pull this out
+    # too
     subject_ids = []
-    for idx, line in data.iterrows():
-        info = json.loads(line['subject_data'])
-        subject_ids.append(info.keys()[0])
+    annos = []
+    for idx, row in data.iterrows():
+        subject_ids.append(row['subject_data'].keys()[0])
+        annos.append(row['annotations'][0])
 
+    # Set the new columns
     data['subject_id'] = pd.Series(subject_ids, dtype=int, index=data.index)
+    data['annotations'] = pd.Series(annos, dtype=object, index=data.index)
+
     # Drop the old subject_ids, as not needed
     data.drop('subject_ids', axis=1, inplace=True)
 
@@ -91,6 +99,8 @@ def import_classifications(latest=True, version=None):
         else:
             print("Error: requested version ({}) doesn't exist. Returning all classifications".format(version))
 
+    # Correct the index in case any have been removed
+    data.set_index(np.arange(data.shape[0]), inplace=True)
     return data
 
 
@@ -108,7 +118,7 @@ def import_subjects(active=False):
     project_dirs = get_project_dirs()
     # Load in classifications:
     # Get converters for each column:
-    converters = dict(subject_id=int, project_id=int, workflow_ids=json.loads, subject_set_id=int, metadata=str,
+    converters = dict(subject_id=int, project_id=int, workflow_ids=json.loads, subject_set_id=int, metadata=json.loads,
                       locations=str, classifications_by_workflow=str, retired_in_workflow=str)
     # Load the classifications into DataFrame and get latest subset if needed.
     data = pd.read_csv(project_dirs['subjects'], converters=converters)
@@ -121,15 +131,21 @@ def import_subjects(active=False):
                 ids[idx] = 1
         data = data[ids]
 
+    # Correct the index if subset selected
+    data.set_index(np.arange(data.shape[0]), inplace=True)
     return data
 
 
-def get_df_subset(data, col_name, value):
+def get_df_subset(data, col_name, values, get_range=False):
     """
     Function to return a copy of a subset of a data frame:
     :param data: pd.DataFrame, Data from which to take a subset
     :param col_name: Column name to index the DataFrame
-    :param value: Value to compare the column given by col_name against
+    :param values: A list of values to compare the column given by col_name against. If get_range=True, values should be
+                   a list of length 2, giving the lower and upper limits of the range to select between. Else, values
+                   should be a list of items, where data['col_name'].isin(values) method is used to select data subset.
+    :param get_range: Bool, If true data is returned between the two limits provided by items 0 and 1 of values. If
+                      False data returned is any row where col_name matches an element in values.
     :return: df_subset: A copy of the subset of values in the DataFrame
     """
     if not isinstance(data, pd.DataFrame):
@@ -138,9 +154,25 @@ def get_df_subset(data, col_name, value):
     if not (col_name in data.columns):
         print("Error: Requested col_name not in data columns")
 
+    # Check the values were a list, if not convert
+    if not isinstance(values, list):
+        print("Error: Values should be a list. Converting to list")
+        values = [values]
+
+    if get_range:
+        # Range of values requested. In this case values should be a list of length two. Check
+        if len(values) != 2:
+            print("Error: Range set True, so values should have two items. ")
+
     # TODO: Add in a check for the dtype of value.
 
-    data_subset = data[data[col_name] == value].copy()
+    if get_range:
+        # Get the subset between the range limits
+        data_subset = data[(data[col_name] >= values[0]) & (data[col_name] <= values[1])].copy()
+    else:
+        # Get subset from list of values
+        data_subset = data[data[col_name].isin(values)].copy()
+
     return data_subset
 
 
@@ -207,7 +239,44 @@ def get_subject_set_files(subjects, subject_set_ids, get_all=False):
     return subject_files
 
 
-def create_classification_frame_matched_hdf5(active=True, latest=True):
+def get_event_subject_tree(active=True):
+    """
+    Function to return a dictionary providing the distribution of subject id numbers amongst the hierarchy of
+    ssw event id number, craft and image type. This dictionary is used to make it easier to select subsets of
+    classifications relating to a particular event / craft / image type.
+    :param active: Bool, True if the dictionary should only return information on subjects currently assigned to an
+                   active workflow
+    :return event_tree: A dictionary with the structure event_tree[event_key][craft][im_type] = [subject_ids]
+    """
+    subjects = import_subjects(active=active)
+
+    event_ids = []
+
+    for ids, sub in subjects.iterrows():
+        ssw_code = sub['metadata']['subject_name'].split('_')
+        ssw_code = "_".join(ssw_code[0:2])
+        event_ids.append(ssw_code)
+
+    # Get unique event id's
+    event_ids = list(set(event_ids))
+
+    event_tree = dict()
+    for e in event_ids:
+        event_tree[e] = {'sta': {'norm': [], 'diff': []}, 'stb': {'norm': [], 'diff': []}}
+
+    # Now populate the lists in event_num/craft/im_type lists with the relevant subject ids
+    for ids, sub in subjects.iterrows():
+        name = sub['metadata']['subject_name'].split('_')
+        ssw_code = "_".join(name[0:2])
+        craft = name[4]
+        im_type = name[5]
+
+        event_tree[ssw_code][craft][im_type].append(sub['subject_id'])
+
+    return event_tree
+
+
+def match_all_classifications_to_ssw_events(active=True, latest=True):
     """
     A function to process the Solar Stormwatch subjects to create a HDF5 data structure containing linking each
     classification with it's corresponding frame.
@@ -219,91 +288,167 @@ def create_classification_frame_matched_hdf5(active=True, latest=True):
     project_dirs = get_project_dirs()
 
     # Get classifications from latest workflow
-    classifications = import_classifications(latest=latest)
+    all_classifications = import_classifications(latest=latest)
     # Only import currently active subjects
-    subjects = import_subjects(active=active)
+    all_subjects = import_subjects(active=active)
+    # Get the event tree, detailing which subjects relate to which event number/ craft and image type.
+    event_tree = get_event_subject_tree(active=active)
 
     # Setup the HDF5 data file.
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'out_data.hdf5')
+    # Clear it out if it already exists:
+    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
     if os.path.exists(out_hdf5_name):
         os.remove(out_hdf5_name)
 
     # Create the hdf5 output files
     hdf = h5py.File(out_hdf5_name, "w")
 
-    # Loop through the unique subject sets
-    for set_id in subjects['subject_set_id'].unique():
-        # Get all subjects in this set
-        subject_subset = get_df_subset(subjects, 'subject_set_id', set_id)
+    for event_key, craft in event_tree.iteritems():
 
-        # Get info on the files in this set.
-        set_files = get_subject_set_files(subject_subset, [set_id])
+        for craft_key, im_type in craft.iteritems():
 
-        # Create a group for this set
-        grp_set = hdf.create_group(str(set_id))
-        grp_set.attrs['craft'] = set_files[set_id]['craft']
+            for im_key, subjects in im_type.iteritems():
 
-        # Loop over the subjects in this set
-        for ids, sub in subject_subset.iterrows():
-            # Get the meta information of assets in the subject
-            info = json.loads(sub['metadata'])
+                for sub in subjects:
+                    # Get the subjects for this subject_id
+                    subjects_subset = get_df_subset(all_subjects, 'subject_id', [sub], get_range=False)
+                    meta = subjects_subset['metadata'].values[0]
+                    # Get the classifications for this subset
+                    clas_subset = get_df_subset(all_classifications, 'subject_id', [sub], get_range=False)
+                    for asset_id in range(3):
+                        asset_key = "asset_{}".format(asset_id)
+                        # Form a timestring for the hdf5 branch name
+                        file_parts = os.path.splitext(meta[asset_key])[0].split('_')
+                        time_string = "_".join(file_parts[6:8])
+                        time_string = pd.datetime.strptime(time_string, '%Y%m%d_%H%M%S').isoformat()
+                        # Make a branch for this image type / asset time.
+                        branch = "/".join([event_key, craft_key, im_key, time_string])
+                        print branch
+                        asset_grp = hdf.create_group(branch)
+                        # Loop over the classifications to pull out the annotations for this asset.
+                        all_x_pix = []
+                        all_y_pix = []
+                        all_user = []
+                        # Counter for the number of submissions on this asset
+                        submission_count = 0
+                        # Iterate through classification rows to find annotations on this asset
+                        for idc, cla in clas_subset.iterrows():
+                            # Loop through values and find value with frame matching asset index
+                            for val in cla['annotations']['value']:
+                                # Does this frame match the asset of interest?
+                                if val['frame'] == asset_id:
+                                    # Get the data for this user classification
+                                    user_x_pix = [int(p['x']) for p in val['points']]
+                                    user_y_pix = [int(p['y']) for p in val['points']]
+                                    user_id = cla['user_id']
+                                    # Set up a group for this user.
+                                    branch = "users/user_{}".format(submission_count)
+                                    print "---->" + branch
+                                    user_grp = asset_grp.create_group(branch)
+                                    # Assign the user data to their group
+                                    user_grp.create_dataset('x_pix', data=np.array(user_x_pix, dtype=int))
+                                    user_grp.create_dataset('y_pix', data=np.array(user_y_pix, dtype=int))
+                                    user_grp.create_dataset('id', data=user_id)
+                                    # Dump users data into collection of annotations.
+                                    all_x_pix.extend(user_x_pix)
+                                    all_y_pix.extend(user_y_pix)
+                                    all_user.append(user_id)
+                                    submission_count += 1
 
-            # Find classifications for this subject
-            clas_subset = get_df_subset(classifications, 'subject_id', sub['subject_id'])
-
-            # Loop over the assets in this subject
-            for asset_id in range(3):
-                key = "asset_{}".format(asset_id)
-                # Form a timestring for the hdf5 branch name
-                file_parts = os.path.splitext(info[key])[0].split('_')
-                timestr = "_".join(file_parts[6:8])
-                timestr = pd.datetime.strptime(timestr, '%Y%m%d_%H%M%S').isoformat()
-
-                # Make a branch for this image type / asset time.
-                branch = "/".join([info['img_type'], timestr])
-                print branch
-                grp_asset = grp_set.create_group(branch)
-
-                # Loop over the classifications to pull out the annotations for this asset.
-                all_x_pix = []
-                all_y_pix = []
-                all_user = []
-                # Counter for the number of submissions on this asset
-                submission_count = 0
-                for idc, cla in clas_subset.iterrows():
-
-                    # Get the annotation
-                    cla_anno = json.loads(cla['annotations'])[0]
-
-                    # Loop through values and find value with frame matching asset index
-                    for val in cla_anno['value']:
-                        # Does this frame match the asset of interest?
-                        if val['frame'] == asset_id:
-                            # Get the data for this user classification
-                            user_x_pix = [int(p['x']) for p in val['points']]
-                            user_y_pix = [int(p['y']) for p in val['points']]
-                            user_id = cla['user_id']
-                            # Set up a group for this user.
-                            branch = "users/user_{}".format(submission_count)
-                            print "---->" + branch
-                            grp_user = grp_asset.create_group(branch)
-                            # Assign the user data to their group
-                            grp_user.create_dataset('x_pix', data=np.array(user_x_pix, dtype=int))
-                            grp_user.create_dataset('y_pix', data=np.array(user_y_pix, dtype=int))
-                            grp_user.create_dataset('id', data=user_id)
-                            # Dump users data into collection of annotations.
-                            all_x_pix.extend(user_x_pix)
-                            all_y_pix.extend(user_y_pix)
-                            all_user.append(user_id)
-                            submission_count += 1
-
-                # Now add on the collected annotation to the assets group.
-                grp_asset.create_dataset('x_pix', data=np.array(all_x_pix, dtype=int))
-                grp_asset.create_dataset('y_pix', data=np.array(all_y_pix, dtype=int))
-                grp_asset.create_dataset('user_list', data=np.array(all_user, dtype=int))
-
+                        # Now add on the collected annotations to the assets group.
+                        asset_grp.create_dataset('x_pix', data=np.array(all_x_pix, dtype=int))
+                        asset_grp.create_dataset('y_pix', data=np.array(all_y_pix, dtype=int))
+                        asset_grp.create_dataset('user_list', data=np.array(all_user, dtype=int))
     hdf.close()
 
+def match_user_classifications_to_ssw_events(username, active=True, latest=True):
+    """
+    A function to process the Solar Stormwatch subjects to create a HDF5 data structure containing linking each
+    classification of a specific user with it's corresponding frame.
+    :param username: String, zooniverse username of the user to extract the stormwatch annotations for
+    :param active: Bool, If true only processes subjects currently assigned to a workflow.
+    :param latest: Bool, If true only processes classifications from the latest version of the workflow
+    :return:
+    """
+
+    project_dirs = get_project_dirs()
+
+    # Get classifications from latest workflow
+    all_classifications = import_classifications(latest=latest)
+
+    # Get subset of these classifications for this user.
+    user_classifications = get_df_subset(all_classifications, 'user_name', username, get_range=False)
+
+    # Only import currently active subjects
+    all_subjects = import_subjects(active=active)
+    # Get the event tree, detailing which subjects relate to which event number/ craft and image type.
+    event_tree = get_event_subject_tree(active=active)
+
+    # Setup the HDF5 data file.
+    # Clear it out if it already exists:
+    name = "user_{}_classifications_matched_ssw_events.hdf5".format(username)
+    out_hdf5_name = os.path.join(project_dirs['out_data'], name)
+    if os.path.exists(out_hdf5_name):
+        os.remove(out_hdf5_name)
+
+    # Create the hdf5 output files
+    hdf = h5py.File(out_hdf5_name, "w")
+
+    for event_key, craft in event_tree.iteritems():
+
+        for craft_key, im_type in craft.iteritems():
+
+            for im_key, subjects in im_type.iteritems():
+
+                for sub in subjects:
+                    # Get the subjects for this subject_id
+                    subjects_subset = get_df_subset(all_subjects, 'subject_id', [sub], get_range=False)
+                    meta = subjects_subset['metadata'].values[0]
+                    # Get the users classifications for this subset
+                    clas_subset = get_df_subset(user_classifications, 'subject_id', [sub], get_range=False)
+                    for asset_id in range(3):
+                        asset_key = "asset_{}".format(asset_id)
+                        # Form a timestring for the hdf5 branch name
+                        file_parts = os.path.splitext(meta[asset_key])[0].split('_')
+                        time_string = "_".join(file_parts[6:8])
+                        time_string = pd.datetime.strptime(time_string, '%Y%m%d_%H%M%S').isoformat()
+                        # Make a branch for this image type / asset time.
+                        branch = "/".join([event_key, craft_key, im_key, time_string])
+                        print branch
+                        asset_grp = hdf.create_group(branch)
+                        # Loop over the classifications to pull out the annotations for this asset.
+                        all_x_pix = []
+                        all_y_pix = []
+                        # Counter for the number of submissions by this user on this asset
+                        submission_count = 0
+                        # Iterate through classification rows to find annotations on this asset
+                        for idc, cla in clas_subset.iterrows():
+                            # Loop through values and find value with frame matching asset index
+                            for val in cla['annotations']['value']:
+                                # Does this frame match the asset of interest?
+                                if val['frame'] == asset_id:
+                                    # Get the data for this user classification
+                                    user_x_pix = [int(p['x']) for p in val['points']]
+                                    user_y_pix = [int(p['y']) for p in val['points']]
+                                    n_points = len(user_x_pix)
+                                    # Set up a group for this user.
+                                    branch = "classifications/classification_{}".format(submission_count)
+                                    print "---->" + branch
+                                    user_grp = asset_grp.create_group(branch)
+                                    # Assign the user data to their group
+                                    user_grp.create_dataset('x_pix', data=np.array(user_x_pix, dtype=int))
+                                    user_grp.create_dataset('y_pix', data=np.array(user_y_pix, dtype=int))
+                                    user_grp.create_dataset('n_points', data=n_points)
+                                    # Dump users data into collection of annotations.
+                                    all_x_pix.extend(user_x_pix)
+                                    all_y_pix.extend(user_y_pix)
+                                    submission_count += 1
+
+                        # Now add on the collected annotations to the assets group.
+                        asset_grp.create_dataset('x_pix', data=np.array(all_x_pix, dtype=int))
+                        asset_grp.create_dataset('y_pix', data=np.array(all_y_pix, dtype=int))
+                        asset_grp.create_dataset('classification_count', data=np.array(submission_count, dtype=int))
+    hdf.close()
 
 def test_plot():
     """
@@ -311,30 +456,42 @@ def test_plot():
     :return:
     """
     project_dirs = get_project_dirs()
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'out_data.hdf5')
+    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
 
     hdf = h5py.File(out_hdf5_name, "r")
-    for grp in hdf.values():
-        fig, ax = plt.subplots(1, 2, figsize=(15, 7))
+    for event in hdf.values():
 
-        for im_type, grp2, a in zip(grp.keys(), grp.values(), ax):
-            # Get time lims.
-            norm = mpl.colors.Normalize(vmin=0, vmax=len(grp2.keys()))
-            cmap = mpl.cm.viridis
-            c = 0
-            for k, v in grp2.iteritems():
-                a.plot(v['x_pix'][...], v['y_pix'][...], 'o', color=cmap(norm(c)))
-                a.set_title("Tracked in {0} {1} image".format(grp.attrs['craft'], im_type))
-                c += 1
+        for craft_k, craft in event.iteritems():
 
-        for a in ax:
-            a.set_xlim(0, 1023)
-            a.set_ylim(0, 1023)
-            a.set_aspect('equal')
+            fig, ax = plt.subplots(1, 2, figsize=(15, 7))
 
-        plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-        name = os.path.join(project_dirs['figs'], grp.attrs['craft']+'_test.jpg')
-        plt.savefig(name)
+            for i, (im_k, img) in enumerate(craft.iteritems()):
+
+                for time_k, times in img.iteritems():
+
+                    print craft_k, im_k, time_k
+
+
+
+                        # Get time lims.
+                        norm = mpl.colors.Normalize(vmin=0, vmax=len(times.keys()))
+                        cmap = mpl.cm.viridis
+                        c = 0
+                        for k, v in times.iteritems():
+                            a.plot(v['x_pix'][...], v['y_pix'][...], 'o', color=cmap(norm(c)))
+                            a.set_title("Tracked in {0} {1} image".format(grp.attrs['craft'], im_type))
+                            c += 1
+
+                    for a in ax:
+                        a.set_xlim(0, 1023)
+                        a.set_ylim(0, 1023)
+                        a.set_aspect('equal')
+
+                    plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
+                    name = os.path.join(project_dirs['figs'], grp.attrs['craft'] + '_test.jpg')
+                    plt.savefig(name)
+                    plt.close('all')
+
 
 def test_animation():
     """
@@ -356,7 +513,7 @@ def test_animation():
         cmap = mpl.cm.viridis
         c = 0
         craft = grp.attrs['craft']
-        for norm_t, diff_t in zip(norm.itervalues(),diff.itervalues()):
+        for norm_t, diff_t in zip(norm.itervalues(), diff.itervalues()):
             ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
             ax[0].set_title("Tracked in {0} {1} image".format('craft', 'norm'))
 
