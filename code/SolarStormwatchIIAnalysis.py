@@ -7,6 +7,8 @@ import h5py
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import scipy.stats as stats
+import hi_processing as hip
+import astropy.units as u
 
 
 def get_project_dirs():
@@ -339,7 +341,7 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                                 if val['frame'] == asset_id:
                                     # Get the data for this user classification
                                     user_x_pix = [int(p['x']) for p in val['points']]
-                                    user_y_pix = [int(p['y']) for p in val['points']]
+                                    user_y_pix = [1023 - int(p['y']) for p in val['points']]
                                     user_id = cla['user_id']
                                     # Set up a group for this user.
                                     branch = "users/user_{}".format(submission_count)
@@ -360,6 +362,7 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                         asset_grp.create_dataset('y_pix', data=np.array(all_y_pix, dtype=int))
                         asset_grp.create_dataset('user_list', data=np.array(all_user, dtype=int))
     hdf.close()
+
 
 def match_user_classifications_to_ssw_events(username, active=True, latest=True):
     """
@@ -429,7 +432,7 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                                 if val['frame'] == asset_id:
                                     # Get the data for this user classification
                                     user_x_pix = [int(p['x']) for p in val['points']]
-                                    user_y_pix = [int(p['y']) for p in val['points']]
+                                    user_y_pix = [1023 - int(p['y']) for p in val['points']]
                                     n_points = len(user_x_pix)
                                     # Set up a group for this user.
                                     branch = "classifications/classification_{}".format(submission_count)
@@ -450,6 +453,7 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                         asset_grp.create_dataset('classification_count', data=np.array(submission_count, dtype=int))
     hdf.close()
 
+
 def test_plot():
     """
     A function to load in the test version of the HDF5 stormwatch data and produce a test plot.
@@ -459,7 +463,7 @@ def test_plot():
     out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
 
     hdf = h5py.File(out_hdf5_name, "r")
-    for event in hdf.values():
+    for event_k, event in hdf.iteritems():
 
         for craft_k, craft in event.iteritems():
 
@@ -467,159 +471,228 @@ def test_plot():
 
             for i, (im_k, img) in enumerate(craft.iteritems()):
 
+                # Get time lims.
+                norm = mpl.colors.Normalize(vmin=0, vmax=len(img.keys()))
+                cmap = mpl.cm.viridis
+                c = 0
                 for time_k, times in img.iteritems():
-
                     print craft_k, im_k, time_k
+                    ax[i].plot(times['x_pix'][...], times['y_pix'][...], 'o', color=cmap(norm(c)))
+                    c += 1
 
+                ax[i].set_title("Tracked in {0} {1} image".format(craft_k, im_k))
+                ax[i].set_xlim(0, 1023)
+                ax[i].set_ylim(0, 1023)
+                ax[i].set_aspect('equal')
 
-
-                        # Get time lims.
-                        norm = mpl.colors.Normalize(vmin=0, vmax=len(times.keys()))
-                        cmap = mpl.cm.viridis
-                        c = 0
-                        for k, v in times.iteritems():
-                            a.plot(v['x_pix'][...], v['y_pix'][...], 'o', color=cmap(norm(c)))
-                            a.set_title("Tracked in {0} {1} image".format(grp.attrs['craft'], im_type))
-                            c += 1
-
-                    for a in ax:
-                        a.set_xlim(0, 1023)
-                        a.set_ylim(0, 1023)
-                        a.set_aspect('equal')
-
-                    plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-                    name = os.path.join(project_dirs['figs'], grp.attrs['craft'] + '_test.jpg')
-                    plt.savefig(name)
-                    plt.close('all')
+            plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
+            name = os.path.join(project_dirs['figs'], "_".join([event_k, craft_k, 'test.jpg']))
+            plt.savefig(name)
+            plt.close('all')
 
 
 def test_animation():
     """
-    A function to load in the test version of the HDF5 stormwatch data and produce a test animation.
+    A function to load in the test version of the HDF5 stormwatch data and produce a test plot.
     :return:
     """
     project_dirs = get_project_dirs()
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'out_data.hdf5')
+    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
 
     hdf = h5py.File(out_hdf5_name, "r")
+    for event_k, event in hdf.iteritems():
 
-    for grp in hdf.values():
-        norm = grp['norm']
-        diff = grp['diff']
-        fig, ax = plt.subplots(1, 2, figsize=(15, 7))
-        im_count = 0
-        # Get time lims.
-        cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
-        cmap = mpl.cm.viridis
-        c = 0
-        craft = grp.attrs['craft']
-        for norm_t, diff_t in zip(norm.itervalues(), diff.itervalues()):
-            ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
-            ax[0].set_title("Tracked in {0} {1} image".format('craft', 'norm'))
+        for craft_k, craft in event.iteritems():
 
-            ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
-            ax[1].set_title("Tracked in {0} {1} image".format('craft', 'diff'))
-            c += 1
+            fig, ax = plt.subplots(1, 2, figsize=(15, 7))
 
-            for a in ax:
-                a.set_xlim(0, 1023)
-                a.set_ylim(0, 1023)
-                a.set_aspect('equal')
+            diff = craft['diff']
+            norm = craft['norm']
+            # Get time lims.
+            cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
+            cmap = mpl.cm.viridis
+            c = 0
+            for norm_t, diff_t in zip(norm.itervalues(), diff.itervalues()):
 
-            plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-            name = os.path.join(project_dirs['figs'], grp.attrs['craft']+"_ani_f{0:03d}.jpg".format(im_count))
-            print name
-            plt.savefig(name)
-            im_count += 1
-        plt.close('all')
+                ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
+                ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
+                c += 1
+                ax[0].set_title("Tracked in {0} {1} image".format(craft_k, 'norm'))
+                ax[1].set_title("Tracked in {0} {1} image".format(craft_k, 'diff'))
+                for a in ax:
+                    a.set_xlim(0, 1023)
+                    a.set_ylim(0, 1023)
+                    a.set_aspect('equal')
 
-    # Make animation and clean up.
-    for craft in ['sta', 'stb']:
-        src = os.path.join(project_dirs['figs'], craft + "*_ani*.jpg")
-        dst = os.path.join(project_dirs['figs'], craft + "_front_id_test.gif")
-        cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
-        os.system(cmd)
-        # Tidy.
-        files = glob.glob(src)
-        for f in files:
-            os.remove(f)
+                plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
+                name = os.path.join(project_dirs['figs'], event_k + "_" + craft_k + "_ani_f{0:03d}.jpg".format(c))
+                print name
+                plt.savefig(name)
+
+            plt.close('all')
+
+        # Make animation and clean up.
+        for craft in ['sta', 'stb']:
+            src = os.path.join(project_dirs['figs'], event_k + "_" + craft + "*_ani*.jpg")
+            dst = os.path.join(project_dirs['figs'], event_k + "_" + craft + "_front_id_test.gif")
+            cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
+            os.system(cmd)
+            # Tidy.
+            files = glob.glob(src)
+            for f in files:
+                os.remove(f)
 
 
 def test_front_density():
     """
-    A function to load in the test version of the HDF5 stormwatch data and produce a test animation.
+    A function to load in the test version of the HDF5 stormwatch data and produce a test plot.
     :return:
     """
     project_dirs = get_project_dirs()
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'out_data.hdf5')
+    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
 
     hdf = h5py.File(out_hdf5_name, "r")
+    for event_k, event in hdf.iteritems():
 
-    for grp in hdf.values():
-        norm = grp['norm']
-        diff = grp['diff']
-        im_count = 0
-        # Get time lims.
-        cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
-        cmap = mpl.cm.viridis
-        cmap.set_bad(color='k')
-        c = 0
-        craft = grp.attrs['craft']
+        for craft_k, craft in event.iteritems():
 
-        x = np.arange(0, 1023)
-        y = np.arange(0, 1023)
-        xm, ym = np.meshgrid(x, y)
-        positions = np.vstack([xm.ravel(), ym.ravel()])
+            diff = craft['diff']
+            norm = craft['norm']
+            # Get time lims.
+            cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
+            cmap = mpl.cm.viridis
+            c = 0
 
-        for norm_t, diff_t in zip(norm.itervalues(),diff.itervalues()):
+            x = np.arange(0, 1023)
+            y = np.arange(0, 1023)
+            xm, ym = np.meshgrid(x, y)
+            positions = np.vstack([xm.ravel(), ym.ravel()])
 
-            plot_front = False
-            if (len(norm_t['x_pix'])>5) & (len(diff_t['x_pix'])>5):
-                plot_front = True
-                values = np.vstack([norm_t['x_pix'], norm_t['y_pix']])
-                norm_kernel = stats.gaussian_kde(values)
+            for norm_t, diff_t in zip(norm.itervalues(), diff.itervalues()):
 
-                values = np.vstack([diff_t['x_pix'], diff_t['y_pix']])
-                diff_kernel = stats.gaussian_kde(values)
+                plot_front = False
+                if (len(norm_t['x_pix']) > 5) & (len(diff_t['x_pix']) > 5):
+                    plot_front = True
+                    values = np.vstack([norm_t['x_pix'], norm_t['y_pix']])
+                    norm_kernel = stats.gaussian_kde(values)
 
-                norm_cme_loc = np.reshape(norm_kernel(positions).T, xm.shape)
-                diff_cme_loc = np.reshape(diff_kernel(positions).T, xm.shape)
+                    values = np.vstack([diff_t['x_pix'], diff_t['y_pix']])
+                    diff_kernel = stats.gaussian_kde(values)
 
-            ###########################################################################
-            fig, ax = plt.subplots(1, 2, figsize=(14, 7.05))
-            if plot_front:
-                q = np.percentile(norm_cme_loc, [90, 92.5, 95, 97.5, 100])
-                ax[0].contourf(xm, ym, norm_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
-                q = np.percentile(diff_cme_loc, [90, 92.5, 95, 97.5, 100])
-                ax[1].contourf(xm, ym, diff_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
+                    norm_cme_loc = np.reshape(norm_kernel(positions).T, xm.shape)
+                    diff_cme_loc = np.reshape(diff_kernel(positions).T, xm.shape)
 
-            ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color='r')
-            ax[0].set_title("Tracked in {0} {1} image".format('craft', 'norm'))
+                ###########################################################################
+                fig, ax = plt.subplots(1, 2, figsize=(14, 7.05))
+                if plot_front:
+                    extent = (0, 1023, 0, 1023)
+                    #q = np.percentile(norm_cme_loc, [90, 92.5, 95, 97.5, 100])
+                    #ax[0].contourf(xm, ym, norm_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
+                    ax[0].imshow(norm_cme_loc, origin='lower', cmap=cmap, alpha=0.5, extent=extent)
+                    #q = np.percentile(diff_cme_loc, [90, 92.5, 95, 97.5, 100])
+                    #ax[1].contourf(xm, ym, diff_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
+                    ax[1].imshow(diff_cme_loc, origin='lower', cmap=cmap, alpha=0.5, extent=extent)
 
-            ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color='r')
-            ax[1].set_title("Tracked in {0} {1} image".format('craft', 'diff'))
-            c += 1
+                ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color='r')
+                ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color='r')
+                c += 1
+                ax[0].set_title("Tracked in {0} {1} image".format(craft_k, 'norm'))
+                ax[1].set_title("Tracked in {0} {1} image".format(craft_k, 'diff'))
+                for a in ax:
+                    a.set_xlim(0, 1023)
+                    a.set_ylim(0, 1023)
+                    a.set_aspect('equal')
 
-            for a in ax:
-                a.set_xlim(0, 1023)
-                a.set_ylim(0, 1023)
-                a.set_aspect('equal')
+                plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
+                name = os.path.join(project_dirs['figs'], event_k + "_" + craft_k + "_ani_CME_density_f{0:03d}.jpg".format(c))
+                print name
+                plt.savefig(name)
+                plt.close('all')
 
-            plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-            name = os.path.join(project_dirs['figs'], grp.attrs['craft']+"_ani_CME_density_f{0:03d}.jpg".format(im_count))
-            print name
-            plt.savefig(name)
-            plt.close('all')
-            im_count += 1
+        # Make animation and clean up.
+        for craft in ['sta', 'stb']:
+            src = os.path.join(project_dirs['figs'], event_k + "_" + craft + "*_ani_CME_density*.jpg")
+            dst = os.path.join(project_dirs['figs'], event_k + "_" + craft + "_CME_front_density.gif")
+            cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
+            os.system(cmd)
+            # Tidy.
+            files = glob.glob(src)
+            for f in files:
+                os.remove(f)
+
+        break
 
 
-    # Make animation and clean up.
-    for craft in ['sta', 'stb']:
-        src = os.path.join(project_dirs['figs'], craft + "*_ani_CME_density*.jpg")
-        dst = os.path.join(project_dirs['figs'], craft + "_front_density_test.gif")
-        cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
-        os.system(cmd)
-        # Tidy.
-        files = glob.glob(src)
-        for f in files:
-            os.remove(f)
+def test_front_reconstruction():
+    """
+    A function to load in the test version of the HDF5 stormwatch data and produce a test plot.
+    :return:
+    """
+    project_dirs = get_project_dirs()
+    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+
+    hdf = h5py.File(out_hdf5_name, "r")
+    ssw_event = 'ssw_009'
+    craft = 'sta'
+    im_type = 'diff'
+    path = "/".join(['', ssw_event, craft, im_type])
+    data = hdf[path]
+
+    # Use data keys to get times, then make time pa DF to store front elongation in.
+
+    # Loop through the times.
+    # >>> Find relevant fits file. - done
+    # >>> Get HPR coordinates. - done
+    # >>> Convert the pixel coordinates to HPR coordinates. - done
+    # >>> Loop through PA grid - done
+    # >>> ^^^ Find points in this PA window. - done
+    # >>> ^^^ KS density fit to elongation of these points. - done
+    # >>> ^^^ Find elongation of maximum of estimated dist. - done
+    # >>> ^^^ Append to DF - done
+    # >>> Use Storm front DF to add in pa,elongation and pixel coords of the Stormfront to the HDF dataframe.
+    # >>> Should I spline gaps in the storm front profile? In HPR coords this may not be a bad fit, as pretty linear.
+
+    # Get pa bin
+    pa_bin_wid = 5
+    pa_bins = np.arange(50, 130, pa_bin_wid)
+    pa_tol = pa_bin_wid / 2.0
+    # El values to loop up dist at.
+    el_bins = np.arange(4, 25, 0.1)
+
+    columns  = {t:pd.Series(data=np.zeros(pa_bins.size)) for t in data.iterkeys()}
+    storms = pd.DataFrame(data=columns, index=pa_bins)
+    del columns
+
+    for t, anno in data.iteritems():
+
+        t_start = pd.to_datetime(t)
+        files = hip.find_hi_files(t_start, t_start, craft=craft, camera='hi1', background_type=1 )
+        files = files[0]
+        print files
+        himap = hip.get_image_plain(files, star_suppress=False)
+
+        # Convert classifications from pixels to to HPR coords.
+        x = np.array(anno['x_pix'][...]) * u.pix
+        y = np.array(anno['y_pix'][...]) * u.pix
+        el, pa = hip.convert_pix_to_hpr(x, y, himap)
+
+        # Loop through position angles, find points in that bin, work out elongation distribution, get mode.
+        for pab in pa_bins:
+            el_sub = el[ (pa.value >= pab - pa_tol) & (pa.value <= pab + pa_tol)]
+            if len(el_sub) >= 5:
+                kernal = stats.gaussian_kde(el_sub.value)
+                el_dist = kernal(el_bins)
+                el_consensus = el_bins[np.argmax(el_dist)]
+                # plt.figure()
+                # plt.plot(el_bins, el_dist,'k-')
+                # plt.plot(el_sub, np.zeros(el_sub.size), 'r.')
+                # ylims = plt.gca().get_ylim()
+                # plt.vlines(el_consensus, ylims[0], ylims[1], colors='b')
+                # plt.ylim(ylims[0], ylims[1])
+                # plt.show()
+            else:
+                el_consensus = np.NaN
+
+            # Assign to storms
+            storms.loc[pab,t] = el_consensus
+

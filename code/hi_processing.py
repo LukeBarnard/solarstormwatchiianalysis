@@ -1,6 +1,6 @@
 import glob
 import os
-import asset_production_tools as apt
+import SolarStormwatchIIAnalysis as ssw
 import numpy as np
 import pandas as pd
 import scipy.interpolate as interp
@@ -8,6 +8,7 @@ import scipy.ndimage as ndimage
 import scipy.signal as signal
 import sunpy.map as smap
 import sunpy.image.coalignment as coalign
+import astropy.units as u
 
 
 def find_hi_files(t_start, t_stop, craft="sta", camera="hi1", background_type=1):
@@ -24,7 +25,7 @@ def find_hi_files(t_start, t_stop, craft="sta", camera="hi1", background_type=1)
     # level > background_type > craft > img > camera > daily_directories > hi_data_files
 
     # Get HI dirs.
-    proj_dirs = apt.project_info()
+    proj_dirs = ssw.get_project_dirs()
 
     # Check the input arguments:
     if craft not in {'sta', 'stb'}:
@@ -332,8 +333,98 @@ def get_image_diff(file_c, file_p, star_suppress=False, align=True, smoothing=Fa
 
         # Apply some median smoothing.
         if smoothing:
-            hi_c.data = signal.medfilt2d(hi_c.data, (5,5))
+            hi_c.data = signal.medfilt2d(hi_c.data, (5, 5))
     else:
         hi_c.data = hi_c.data*np.NaN
 
     return hi_c
+
+
+def convert_hpc_to_hpr(lon, lat):
+    """
+    Function to convert helioprojective cartesian coordinates (longitudes and latitudes) into helioprojective radial
+    coordinates (elongations and position angles). Conversion done by Eqn. 19 in Thompson 2006.
+    :param lon: Array of longitudes. Should have astropy unit of degrees.
+    :param lat: Array of latitudes. Should have astropy unit of degrees.
+    :return el: Array of elongations with astropy unit of degrees.
+    :return pa: Array of position angles with astropy unit of degrees.
+    """
+    # TODO: Check inputs
+
+    # Put it in rads and without unit for np
+    lon = lon.to('rad').value
+    lat = lat.to('rad').value
+    # Elongation calc:
+    # Get numerator and denomenator for atan2 calculation
+    btm = np.cos(lat) * np.cos(lon)
+    top = np.sqrt((np.cos(lat) ** 2) * (np.sin(lon) ** 2) + (np.sin(lat) ** 2))
+    el = np.arctan2(top, btm)
+    # Position angle calc:
+    btm = np.sin(lat)
+    top = -np.cos(lat) * np.sin(lon)
+    pa = np.arctan2(top, btm)
+    # Correct eastern longitudes so pa runs from 0>2pi, rather than 0>pi.
+    pa[lon >= 0] += 2 * np.pi
+    # Put it back into degs
+    el = np.rad2deg(el) * u.deg
+    pa = np.rad2deg(pa) * u.deg
+    return el, pa
+
+
+def convert_hpr_to_hpc(el, pa):
+    """
+    Function to convert helioprojective radial coordinates (elongations and position angles) into helioprojective
+    cartesian coordinates (longitudes and latitudes) . Conversion done by Eqn. 20 in Thompson 2006.
+    :param el: Array of elongations. Should have astropy unit of degrees.
+    :param pa: Array of position angles. Should have astropy unit of degrees.
+    :return lon: Array of longitudes with astropy unit of degrees.
+    :return lat: Array of latitudes angles with astropy unit of degrees.
+    """
+    # TODO: Check inputs
+
+    # Put it in rads and without unit for np
+    el = el.to('rad').value
+    pa = pa.to('rad').value
+    # Longitude calc:
+    # Get numerator and denomenator for atan2 calculation
+    btm = np.cos(el)
+    top = -np.sin(el) * np.sin(pa)
+    lon = np.arctan2(top, btm)
+    # Latitude calc:
+    lat = np.arcsin(np.sin(el) * np.cos(pa))
+    # Put it back into degs
+    lon = np.rad2deg(lon) * u.deg
+    lat = np.rad2deg(lat) * u.deg
+    return lon, lat
+
+def convert_pix_to_hpr(x, y, himap):
+    """
+    Function to convert pixel coordinates (longitudes and latitudes) into helioprojective radial
+    coordinates (elongations and position angles). Conversion done by formula in Thompson 2006.
+    :param x: Array of x-pixel coordinates. Should have astropy unit of pixels.
+    :param y: Array of y-pixel coordinates. Should have astropy unit of pixels.
+    :param himap: Sunpy Map object of the Heliospheric Imager file to convert pixel coordinates to HPR coordinates.
+    :return el: Array of elongations with astropy unit of degrees.
+    :return pa: Array of position angles with astropy unit of degrees.
+    """
+    # TODO: Checks for inputs.
+    # Put it in rads for np
+    lon, lat = himap.pixel_to_data(x, y)
+    el, pa = convert_hpc_to_hpr(lon, lat)
+    return el, pa
+
+
+def convert_hpr_to_pix(el, pa, himap):
+    """
+    Function to convert pixel coordinates (longitudes and latitudes) into helioprojective radial
+    coordinates (elongations and position angles). Conversion done by formula in Thompson 2006.
+    :param el: Array of elongations with astropy unit of degrees.
+    :param pa: Array of position angles with astropy unit of degrees.
+    :param himap: Sunpy Map object of the Heliospheric Imager file to convert pixel coordinates to HPR coordinates.
+    :return x: Array of x-pixel coordinates. Should have astropy unit of pixels.
+    :return y: Array of y-pixel coordinates. Should have astropy unit of pixels.
+    """
+    # TODO: Checks for inputs.
+    lon, lat = convert_hpc_to_hpr(el, pa)
+    x, y = himap.data_to_pixel(lon, lat)
+    return x, y
