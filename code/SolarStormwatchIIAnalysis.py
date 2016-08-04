@@ -1,14 +1,15 @@
-import os
 import glob
-import pandas as pd
-import numpy as np
-import simplejson as json
-import h5py
+import os
+import tables
+import astropy.units as u
+import hi_processing as hip
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import scipy.stats as stats
-import hi_processing as hip
-import astropy.units as u
+import numpy as np
+import pandas as pd
+import simplejson as json
+from sklearn.neighbors import KernelDensity
+from sklearn.grid_search import GridSearchCV
 
 
 def get_project_dirs():
@@ -298,39 +299,61 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
 
     # Setup the HDF5 data file.
     # Clear it out if it already exists:
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
-    if os.path.exists(out_hdf5_name):
-        os.remove(out_hdf5_name)
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    if os.path.exists(ssw_out_name):
+        os.remove(ssw_out_name)
 
-    # Create the hdf5 output files
-    hdf = h5py.File(out_hdf5_name, "w")
+    # PyTables Table definition for a users pixels
+    class user_pixel_coords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+
+    # PyTables Table definition for all users pixels, with added weight, based on number of points in users profile.
+    class all_pixel_coords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+        weight = tables.Int32Col()  # 32-bit integer
+
+    # Create the hdf5 output file
+    ssw_out = tables.open_file(ssw_out_name, mode = "w", title = "Test file")
+
+    # Loop through the event tree, making relevant groups in the ssw_out file.
+    # Group structure:
 
     for event_key, craft in event_tree.iteritems():
+        event_group = ssw_out.create_group("/", event_key)
 
         for craft_key, im_type in craft.iteritems():
+            craft_group = ssw_out.create_group(event_group, craft_key)
 
             for im_key, subjects in im_type.iteritems():
+                im_group = ssw_out.create_group(craft_group, im_key)
 
                 for sub in subjects:
                     # Get the subjects for this subject_id
                     subjects_subset = get_df_subset(all_subjects, 'subject_id', [sub], get_range=False)
+                    # Meta info needed for making asset names
                     meta = subjects_subset['metadata'].values[0]
-                    # Get the classifications for this subset
+                    # Get the classifications for this subject subset
                     clas_subset = get_df_subset(all_classifications, 'subject_id', [sub], get_range=False)
+
+                    # Loop over the assets in this subject
                     for asset_id in range(3):
                         asset_key = "asset_{}".format(asset_id)
                         # Form a timestring for the hdf5 branch name
                         file_parts = os.path.splitext(meta[asset_key])[0].split('_')
-                        time_string = "_".join(file_parts[6:8])
-                        time_string = pd.datetime.strptime(time_string, '%Y%m%d_%H%M%S').isoformat()
-                        # Make a branch for this image type / asset time.
-                        branch = "/".join([event_key, craft_key, im_key, time_string])
-                        print branch
-                        asset_grp = hdf.create_group(branch)
-                        # Loop over the classifications to pull out the annotations for this asset.
+                        time_string = "T" + "_".join(file_parts[6:8])
+                        time_string_iso = pd.datetime.strptime(time_string, 'T%Y%m%d_%H%M%S').isoformat()
+
+                        # Make a group for this asset
+                        asset_group = ssw_out.create_group(im_group, time_string, title=time_string_iso)
+
+                        # Form lists for storing all of the user classifications, id numbers and weight
                         all_x_pix = []
                         all_y_pix = []
+                        all_user_weight = []
                         all_user = []
+
                         # Counter for the number of submissions on this asset
                         submission_count = 0
                         # Iterate through classification rows to find annotations on this asset
@@ -339,35 +362,55 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                             for val in cla['annotations']['value']:
                                 # Does this frame match the asset of interest?
                                 if val['frame'] == asset_id:
+                                    # On first pass set up a users group
+                                    if submission_count == 0:
+                                        users_group = ssw_out.create_group(asset_group, 'users')
+
+                                    # Create a group for this user
+                                    user_key = "user_{}".format(submission_count)
+                                    user = ssw_out.create_group(users_group, user_key)
+                                    # Make a table for this users annotation
+                                    table = ssw_out.create_table(user, 'pixel_coords', user_pixel_coords, title="Pixel coords")
+                                    # Assign the annotation to the table
+                                    coord = table.row
+                                    for p in val['points']:
+                                        coord['x'] = int(p['x'])
+                                        coord['y'] = 1023-int(p['y'])
+                                        coord.append()
+                                    # Write to file.
+                                    table.flush()
+
+                                    # Dump users data into collection of annotations.
                                     # Get the data for this user classification
                                     user_x_pix = [int(p['x']) for p in val['points']]
                                     user_y_pix = [1023 - int(p['y']) for p in val['points']]
+                                    user_weight = np.zeros(len(user_x_pix), dtype=int) + len(user_x_pix)
                                     user_id = cla['user_id']
-                                    # Set up a group for this user.
-                                    branch = "users/user_{}".format(submission_count)
-                                    print "---->" + branch
-                                    user_grp = asset_grp.create_group(branch)
-                                    # Assign the user data to their group
-                                    user_grp.create_dataset('x_pix', data=np.array(user_x_pix, dtype=int))
-                                    user_grp.create_dataset('y_pix', data=np.array(user_y_pix, dtype=int))
-                                    user_grp.create_dataset('id', data=user_id)
-                                    # Dump users data into collection of annotations.
                                     all_x_pix.extend(user_x_pix)
                                     all_y_pix.extend(user_y_pix)
+                                    all_user_weight.extend(user_weight)
                                     all_user.append(user_id)
                                     submission_count += 1
 
                         # Now add on the collected annotations to the assets group.
-                        asset_grp.create_dataset('x_pix', data=np.array(all_x_pix, dtype=int))
-                        asset_grp.create_dataset('y_pix', data=np.array(all_y_pix, dtype=int))
-                        asset_grp.create_dataset('user_list', data=np.array(all_user, dtype=int))
-    hdf.close()
+                        table = ssw_out.create_table(asset_group, 'pixel_coords', all_pixel_coords, title="Pixel coords")
+                        # Assign all elements to this row
+                        coord = table.row
+                        for x, y, w in zip(all_x_pix, all_y_pix, all_user_weight):
+                            coord['x'] = x
+                            coord['y'] = y
+                            coord['weight'] = w
+                            coord.append()
+                        # Write to file.
+                        table.flush()
+
+    ssw_out.close()
 
 
 def match_user_classifications_to_ssw_events(username, active=True, latest=True):
     """
     A function to process the Solar Stormwatch subjects to create a HDF5 data structure containing linking each
-    classification of a specific user with it's corresponding frame.
+    classification of a specific user with it's corresponding frame. This is achieved using PyTables.
     :param username: String, zooniverse username of the user to extract the stormwatch annotations for
     :param active: Bool, If true only processes subjects currently assigned to a workflow.
     :param latest: Bool, If true only processes classifications from the latest version of the workflow
@@ -389,40 +432,63 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
 
     # Setup the HDF5 data file.
     # Clear it out if it already exists:
-    name = "user_{}_classifications_matched_ssw_events.hdf5".format(username)
-    out_hdf5_name = os.path.join(project_dirs['out_data'], name)
-    if os.path.exists(out_hdf5_name):
-        os.remove(out_hdf5_name)
+    user_tag = "_".join(["user", username, "classifications_matched_ssw_events.hdf5"])
+    ssw_out_name = os.path.join(project_dirs['out_data'], user_tag)
+    if os.path.exists(ssw_out_name):
+        os.remove(ssw_out_name)
 
-    # Create the hdf5 output files
-    hdf = h5py.File(out_hdf5_name, "w")
+    # PyTables Table definition for a users pixels
+    class user_pixel_coords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+
+    # PyTables Table definition for all users pixels, with added weight, based on number of points in users profile.
+    class all_pixel_coords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+        weight = tables.Int32Col()  # 32-bit integer
+
+    # Create the hdf5 output file
+    ssw_out = tables.open_file(ssw_out_name, mode = "w", title = "Test file")
+
+    # Loop through the event tree, making relevant groups in the ssw_out file.
+    # Group structure:
 
     for event_key, craft in event_tree.iteritems():
+        event_group = ssw_out.create_group("/", event_key)
 
         for craft_key, im_type in craft.iteritems():
+            craft_group = ssw_out.create_group(event_group, craft_key)
 
             for im_key, subjects in im_type.iteritems():
+                im_group = ssw_out.create_group(craft_group, im_key)
 
                 for sub in subjects:
                     # Get the subjects for this subject_id
                     subjects_subset = get_df_subset(all_subjects, 'subject_id', [sub], get_range=False)
+                    # Meta info needed for making asset names
                     meta = subjects_subset['metadata'].values[0]
-                    # Get the users classifications for this subset
+                    # Get the classifications for this subject subset
                     clas_subset = get_df_subset(user_classifications, 'subject_id', [sub], get_range=False)
+
+                    # Loop over the assets in this subject
                     for asset_id in range(3):
                         asset_key = "asset_{}".format(asset_id)
                         # Form a timestring for the hdf5 branch name
                         file_parts = os.path.splitext(meta[asset_key])[0].split('_')
-                        time_string = "_".join(file_parts[6:8])
-                        time_string = pd.datetime.strptime(time_string, '%Y%m%d_%H%M%S').isoformat()
-                        # Make a branch for this image type / asset time.
-                        branch = "/".join([event_key, craft_key, im_key, time_string])
-                        print branch
-                        asset_grp = hdf.create_group(branch)
-                        # Loop over the classifications to pull out the annotations for this asset.
+                        time_string = "T" + "_".join(file_parts[6:8])
+                        time_string_iso = pd.datetime.strptime(time_string, 'T%Y%m%d_%H%M%S').isoformat()
+
+                        # Make a group for this asset
+                        asset_group = ssw_out.create_group(im_group, time_string, title=time_string_iso)
+
+                        # Form lists for storing all of the user classifications, id numbers and weight
                         all_x_pix = []
                         all_y_pix = []
-                        # Counter for the number of submissions by this user on this asset
+                        all_user_weight = []
+                        all_user = []
+
+                        # Counter for the number of submissions on this asset
                         submission_count = 0
                         # Iterate through classification rows to find annotations on this asset
                         for idc, cla in clas_subset.iterrows():
@@ -430,28 +496,49 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                             for val in cla['annotations']['value']:
                                 # Does this frame match the asset of interest?
                                 if val['frame'] == asset_id:
+                                    # On first pass set up a users group
+                                    if submission_count == 0:
+                                        clas_group = ssw_out.create_group(asset_group, 'classifications')
+
+                                    # Create a group for this user
+                                    clas_key = "classification_{}".format(submission_count)
+                                    clas = ssw_out.create_group(clas_group, clas_key)
+                                    # Make a table for this users annotation
+                                    table = ssw_out.create_table(clas, 'pixel_coords', user_pixel_coords, title="Pixel coords")
+                                    # Assign the annotation to the table
+                                    coord = table.row
+                                    for p in val['points']:
+                                        coord['x'] = int(p['x'])
+                                        coord['y'] = 1023-int(p['y'])
+                                        coord.append()
+                                    # Write to file.
+                                    table.flush()
+
+                                    # Dump users data into collection of annotations.
                                     # Get the data for this user classification
                                     user_x_pix = [int(p['x']) for p in val['points']]
                                     user_y_pix = [1023 - int(p['y']) for p in val['points']]
-                                    n_points = len(user_x_pix)
-                                    # Set up a group for this user.
-                                    branch = "classifications/classification_{}".format(submission_count)
-                                    print "---->" + branch
-                                    user_grp = asset_grp.create_group(branch)
-                                    # Assign the user data to their group
-                                    user_grp.create_dataset('x_pix', data=np.array(user_x_pix, dtype=int))
-                                    user_grp.create_dataset('y_pix', data=np.array(user_y_pix, dtype=int))
-                                    user_grp.create_dataset('n_points', data=n_points)
-                                    # Dump users data into collection of annotations.
+                                    user_weight = np.zeros(len(user_x_pix), dtype=int) + len(user_x_pix)
+                                    user_id = cla['user_id']
                                     all_x_pix.extend(user_x_pix)
                                     all_y_pix.extend(user_y_pix)
+                                    all_user_weight.extend(user_weight)
+                                    all_user.append(user_id)
                                     submission_count += 1
 
                         # Now add on the collected annotations to the assets group.
-                        asset_grp.create_dataset('x_pix', data=np.array(all_x_pix, dtype=int))
-                        asset_grp.create_dataset('y_pix', data=np.array(all_y_pix, dtype=int))
-                        asset_grp.create_dataset('classification_count', data=np.array(submission_count, dtype=int))
-    hdf.close()
+                        table = ssw_out.create_table(asset_group, 'pixel_coords', all_pixel_coords, title="Pixel coords")
+                        # Assign all elements to this row
+                        coord = table.row
+                        for x, y, w in zip(all_x_pix, all_y_pix, all_user_weight):
+                            coord['x'] = x
+                            coord['y'] = y
+                            coord['weight'] = w
+                            coord.append()
+                        # Write to file.
+                        table.flush()
+
+    ssw_out.close()
 
 
 def test_plot():
@@ -460,31 +547,41 @@ def test_plot():
     :return:
     """
     project_dirs = get_project_dirs()
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
 
-    hdf = h5py.File(out_hdf5_name, "r")
-    for event_k, event in hdf.iteritems():
+    # Load in the event tree dictionary to easily iterate over the events/craft/img type
+    ssw_event_tree = get_event_subject_tree(active=True)
+
+    # get handle to the ssw out data
+    ssw_out = tables.open_file(ssw_out_name, mode="r")
+
+    # Loop over events, craft and image type
+    for event_k, event in ssw_event_tree.iteritems():
 
         for craft_k, craft in event.iteritems():
 
+            # Make a plot for each image type.
             fig, ax = plt.subplots(1, 2, figsize=(15, 7))
 
-            for i, (im_k, img) in enumerate(craft.iteritems()):
+            for i, img_k in enumerate(craft.iterkeys()):
 
-                # Get time lims.
-                norm = mpl.colors.Normalize(vmin=0, vmax=len(img.keys()))
+                # Get path to this node of the data, pull out the group of times
+                path = "/".join(['', event_k, craft_k, img_k])
+                times = ssw_out.get_node(path)
+                # Set up the normalisation and colormap for the plots
+                norm = mpl.colors.Normalize(vmin=0, vmax=len(times._v_groups))
                 cmap = mpl.cm.viridis
-                c = 0
-                for time_k, times in img.iteritems():
-                    print craft_k, im_k, time_k
-                    ax[i].plot(times['x_pix'][...], times['y_pix'][...], 'o', color=cmap(norm(c)))
-                    c += 1
+                for frame_count, t in enumerate(times):
+                    coords = pd.DataFrame.from_records(t.pixel_coords.read())
+                    ax[i].plot(coords['x'], coords['y'], 'o', color=cmap(norm(frame_count)))
 
-                ax[i].set_title("Tracked in {0} {1} image".format(craft_k, im_k))
+                # Label it up and format
+                ax[i].set_title("Tracked in {0} {1} image".format(craft_k, img_k))
                 ax[i].set_xlim(0, 1023)
                 ax[i].set_ylim(0, 1023)
                 ax[i].set_aspect('equal')
 
+            # Save and move to next plot
             plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
             name = os.path.join(project_dirs['figs'], "_".join([event_k, craft_k, 'test.jpg']))
             plt.savefig(name)
@@ -497,36 +594,49 @@ def test_animation():
     :return:
     """
     project_dirs = get_project_dirs()
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
 
-    hdf = h5py.File(out_hdf5_name, "r")
-    for event_k, event in hdf.iteritems():
+    # Load in the event tree dictionary to easily iterate over the events/craft/img type
+    ssw_event_tree = get_event_subject_tree(active=True)
+
+    # get handle to the ssw out data
+    ssw_out = tables.open_file(ssw_out_name, mode="r")
+
+    # Loop over events and craft
+    for event_k, event in ssw_event_tree.iteritems():
 
         for craft_k, craft in event.iteritems():
-
+            # Make a plot for each image type.
             fig, ax = plt.subplots(1, 2, figsize=(15, 7))
 
-            diff = craft['diff']
-            norm = craft['norm']
-            # Get time lims.
-            cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
-            cmap = mpl.cm.viridis
-            c = 0
-            for norm_t, diff_t in zip(norm.itervalues(), diff.itervalues()):
+            # Get path to the normal and diff img types of this event, pull out the group of times
+            norm_path = "/".join(['', event_k, craft_k, 'norm'])
+            norm_times = ssw_out.get_node(norm_path)
 
-                ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
-                ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color=cmap(cm_norm(c)))
-                c += 1
-                ax[0].set_title("Tracked in {0} {1} image".format(craft_k, 'norm'))
-                ax[1].set_title("Tracked in {0} {1} image".format(craft_k, 'diff'))
-                for a in ax:
+            diff_path = "/".join(['', event_k, craft_k, 'diff'])
+            diff_times = ssw_out.get_node(diff_path)
+
+            # Set up the normalisation and colormap for the plots
+            norm = mpl.colors.Normalize(vmin=0, vmax=len(diff_times._v_groups))
+            cmap = mpl.cm.viridis
+            for frame_count, (norm_t, diff_t) in enumerate(zip(norm_times, diff_times)):
+                norm_coords = pd.DataFrame.from_records(norm_t.pixel_coords.read())
+                ax[0].plot(norm_coords['x'], norm_coords['y'], 'o', color=cmap(norm(frame_count)))
+
+                diff_coords = pd.DataFrame.from_records(diff_t.pixel_coords.read())
+                ax[1].plot(diff_coords['x'], diff_coords['y'], 'o', color=cmap(norm(frame_count)))
+
+                # Label it up and format
+                for a,img_k in zip(ax, ["norm", "diff"]):
+                    a.set_title("Tracked in {0} {1} image".format(craft_k, img_k))
                     a.set_xlim(0, 1023)
                     a.set_ylim(0, 1023)
                     a.set_aspect('equal')
 
+                # Save and move to next plot
                 plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-                name = os.path.join(project_dirs['figs'], event_k + "_" + craft_k + "_ani_f{0:03d}.jpg".format(c))
-                print name
+                name = "_".join([event_k,  craft_k, "ani_f{0:03d}.jpg".format(frame_count)])
+                name = os.path.join(project_dirs['figs'], name )
                 plt.savefig(name)
 
             plt.close('all')
@@ -549,78 +659,85 @@ def test_front_density():
     :return:
     """
     project_dirs = get_project_dirs()
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
 
-    hdf = h5py.File(out_hdf5_name, "r")
-    for event_k, event in hdf.iteritems():
+    # Load in the event tree dictionary to easily iterate over the events/craft/img type
+    ssw_event_tree = get_event_subject_tree(active=True)
+
+    # get handle to the ssw out data
+    ssw_out = tables.open_file(ssw_out_name, mode="r")
+
+    x = np.arange(0,1024)
+    y = np.arange(0, 1024)
+    xm, ym = np.meshgrid(x, y)
+    all_coords = np.vstack([xm.ravel(), ym.ravel()]).T
+
+    # Loop over events and craft
+    for event_k, event in ssw_event_tree.iteritems():
+
+        if event_k != "ssw_009":
+            continue
 
         for craft_k, craft in event.iteritems():
 
-            diff = craft['diff']
-            norm = craft['norm']
-            # Get time lims.
-            cm_norm = mpl.colors.Normalize(vmin=0, vmax=len(norm.keys()))
+            # Get path to the normal and diff img types of this event, pull out the group of times
+            norm_path = "/".join(['', event_k, craft_k, 'norm'])
+            norm_times = ssw_out.get_node(norm_path)
+
+            diff_path = "/".join(['', event_k, craft_k, 'diff'])
+            diff_times = ssw_out.get_node(diff_path)
+
+            # Set up the normalisation and colormap for the plots
+            norm = mpl.colors.Normalize(vmin=0, vmax=len(diff_times._v_groups))
             cmap = mpl.cm.viridis
-            c = 0
+            for frame_count, (norm_t, diff_t) in enumerate(zip(norm_times, diff_times)):
+                # Get the normal and diff coords
+                norm_coords = pd.DataFrame.from_records(norm_t.pixel_coords.read())
+                diff_coords = pd.DataFrame.from_records(diff_t.pixel_coords.read())
+                xy = np.vstack([norm_coords['x'].values.ravel(), norm_coords['y'].values.ravel()]).T
+                # Fit a KDE to these points
+                # 20-fold cross-validation
+                if norm_coords.shape[0] < 20:
+                    continue
 
-            x = np.arange(0, 1023)
-            y = np.arange(0, 1023)
-            xm, ym = np.meshgrid(x, y)
-            positions = np.vstack([xm.ravel(), ym.ravel()])
+                grid = GridSearchCV(KernelDensity(), {'bandwidth': np.linspace(1, 10.0, 30)})
+                grid.fit(xy)
+                print grid.best_params_
+                kde = grid.best_estimator_
+                pdf = np.reshape(kde.score_samples(all_coords),xm.shape)
 
-            for norm_t, diff_t in zip(norm.itervalues(), diff.itervalues()):
-
-                plot_front = False
-                if (len(norm_t['x_pix']) > 5) & (len(diff_t['x_pix']) > 5):
-                    plot_front = True
-                    values = np.vstack([norm_t['x_pix'], norm_t['y_pix']])
-                    norm_kernel = stats.gaussian_kde(values)
-
-                    values = np.vstack([diff_t['x_pix'], diff_t['y_pix']])
-                    diff_kernel = stats.gaussian_kde(values)
-
-                    norm_cme_loc = np.reshape(norm_kernel(positions).T, xm.shape)
-                    diff_cme_loc = np.reshape(diff_kernel(positions).T, xm.shape)
-
-                ###########################################################################
-                fig, ax = plt.subplots(1, 2, figsize=(14, 7.05))
-                if plot_front:
-                    extent = (0, 1023, 0, 1023)
-                    #q = np.percentile(norm_cme_loc, [90, 92.5, 95, 97.5, 100])
-                    #ax[0].contourf(xm, ym, norm_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
-                    ax[0].imshow(norm_cme_loc, origin='lower', cmap=cmap, alpha=0.5, extent=extent)
-                    #q = np.percentile(diff_cme_loc, [90, 92.5, 95, 97.5, 100])
-                    #ax[1].contourf(xm, ym, diff_cme_loc, levels=q, origin='lower', cmap=cmap, alpha=0.5)
-                    ax[1].imshow(diff_cme_loc, origin='lower', cmap=cmap, alpha=0.5, extent=extent)
-
-                ax[0].plot(norm_t['x_pix'][...], norm_t['y_pix'][...], 'o', color='r')
-                ax[1].plot(diff_t['x_pix'][...], diff_t['y_pix'][...], 'o', color='r')
-                c += 1
-                ax[0].set_title("Tracked in {0} {1} image".format(craft_k, 'norm'))
-                ax[1].set_title("Tracked in {0} {1} image".format(craft_k, 'diff'))
-                for a in ax:
+                # Mark on the points
+                fig, ax = plt.subplots(1, 2, figsize=(15, 7))
+                ax[0].contourf(xm, ym, pdf, cmap=cmap)
+                ax[1].contourf(xm, ym, pdf, cmap=cmap)
+                ax[0].plot(norm_coords['x'], norm_coords['y'], 'o', color='r')
+                ax[1].plot(diff_coords['x'], diff_coords['y'], 'o', color='r')
+                plt.show()
+                # Label it up and format
+                for a, img_k in zip(ax, ["norm", "diff"]):
+                    a.set_title("Tracked in {0} {1} image".format(craft_k, img_k))
                     a.set_xlim(0, 1023)
                     a.set_ylim(0, 1023)
                     a.set_aspect('equal')
 
+                # Save and move to next plot
                 plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-                name = os.path.join(project_dirs['figs'], event_k + "_" + craft_k + "_ani_CME_density_f{0:03d}.jpg".format(c))
-                print name
+                name = "_".join([event_k, craft_k, "ani_f{0:03d}.jpg".format(frame_count)])
+                name = os.path.join(project_dirs['figs'], name)
                 plt.savefig(name)
                 plt.close('all')
-
+            break
+        break
         # Make animation and clean up.
         for craft in ['sta', 'stb']:
-            src = os.path.join(project_dirs['figs'], event_k + "_" + craft + "*_ani_CME_density*.jpg")
-            dst = os.path.join(project_dirs['figs'], event_k + "_" + craft + "_CME_front_density.gif")
+            src = os.path.join(project_dirs['figs'], event_k + "_" + craft + "*_ani*.jpg")
+            dst = os.path.join(project_dirs['figs'], event_k + "_" + craft + "_front_id_test.gif")
             cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
             os.system(cmd)
             # Tidy.
             files = glob.glob(src)
             for f in files:
                 os.remove(f)
-
-        break
 
 
 def test_front_reconstruction():

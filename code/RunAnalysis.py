@@ -6,8 +6,8 @@ def main():
     #ssw.match_user_classifications_to_ssw_events(username, active=True, latest=True)
     #ssw.test_plot()
     #ssw.test_animation()
-    #ssw.test_front_density()
-    ssw.test_front_reconstruction()
+    ssw.test_front_density()
+    #ssw.test_front_reconstruction()
     return
 
 if __name__ == "__main__":
