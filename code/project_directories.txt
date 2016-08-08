@@ -1,6 +1,7 @@
 code,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\code
 figs,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\figures
 data,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data
+swpc_data,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\enlil_cme_analysis_single_events.xlsx
 classifications,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-classifications.csv
 subjects,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-subjects.csv
 workflows,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-workflows.csv

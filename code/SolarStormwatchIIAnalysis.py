@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import simplejson as json
 from sklearn.neighbors import KernelDensity
-from sklearn.grid_search import GridSearchCV
+from skimage.morphology import skeletonize
 
 
 def get_project_dirs():
@@ -26,6 +26,7 @@ def get_project_dirs():
                      'code': os.path.join(os.getcwd(), 'code'), 'results': os.path.join(os.getcwd(), 'results'),
                      'hi_data': os.path.join(os.getcwd(), r'STEREO\ares.nrl.navy.mil\lz\L2_1_25'),
                      'out_data': os.path.join(os.getcwd(), 'out_data'),
+                     'swpc_data': os.path.join(os.getcwd(), 'data\\enlil_cme_analysis_single_events.xlsx'),
                      'classifications': os.path.join(os.getcwd(), 'data\\solar-stormwatch-ii-classifications.csv'),
                      'subjects': os.path.join(os.getcwd(), 'data\\solar-stormwatch-ii-subjects.csv'),
                      'workflow_contents': os.path.join(os.getcwd(), 'data\\solar-stormwatch-ii-workflow_contents.csv'),
@@ -44,6 +45,26 @@ def get_project_dirs():
 
     return proj_dirs
 
+
+def load_swpc_events():
+    """
+    Function to load in the excel file containing the SWPC CMEs provided by Curt. Import as a pandas dataframe. There is
+    no official source for this data.
+    :return:
+    """
+    # TODO: Ask Curt for source and acknowledgement for this data?
+    proj_dirs = get_project_dirs()
+    # the swpc cmes has column names [event_id	t_appear	t_start	t_submission	lat	lon	half_width	vel	t_ace_obs
+    # 	t_ace_wsa	diff	late_or_early	t_earth_si	Comment]. Get converters for making sure times ported correctly
+    # Column 'diff' is awkward, as is a time delta, so handle seperately, by parsing to string first
+    convert = dict(t_appear=pd.to_datetime, t_start=pd.to_datetime, t_submission=pd.to_datetime,
+                   t_ace_obs=pd.to_datetime, t_ace_wsa=pd.to_datetime, t_earth_si=pd.to_datetime,
+                   t_hi1a_start=pd.to_datetime, t_hi1a_stop=pd.to_datetime, t_hi1b_start=pd.to_datetime,
+                   t_hi1b_stop=pd.to_datetime, diff=str)
+
+    swpc_cmes = pd.read_excel(proj_dirs['swpc_data'], header=0, index_col=None, converters=convert)
+    swpc_cmes['diff'] = pd.to_timedelta(swpc_cmes['diff'], unit='h')
+    return swpc_cmes
 
 def import_classifications(latest=True, version=None):
     """
@@ -304,21 +325,26 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
         os.remove(ssw_out_name)
 
     # PyTables Table definition for a users pixels
-    class user_pixel_coords(tables.IsDescription):
+    class UserPixelCoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
 
     # PyTables Table definition for all users pixels, with added weight, based on number of points in users profile.
-    class all_pixel_coords(tables.IsDescription):
+    class AllPixelCoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
         weight = tables.Int32Col()  # 32-bit integer
 
+    # PyTables Table definition for all users pixels, with added weight, based on number of points in users profile.
+    class CMEFrontPixelCoords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+
     # Create the hdf5 output file
-    ssw_out = tables.open_file(ssw_out_name, mode = "w", title = "Test file")
+    ssw_out = tables.open_file(ssw_out_name, mode="w", title="SolarStormwatch CME classifications for all users")
 
     # Loop through the event tree, making relevant groups in the ssw_out file.
-    # Group structure:
+    # Group structure: Event: Craft: Img type: All classifications: Individual classifications
 
     for event_key, craft in event_tree.iteritems():
         event_group = ssw_out.create_group("/", event_key)
@@ -370,7 +396,8 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                                     user_key = "user_{}".format(submission_count)
                                     user = ssw_out.create_group(users_group, user_key)
                                     # Make a table for this users annotation
-                                    table = ssw_out.create_table(user, 'pixel_coords', user_pixel_coords, title="Pixel coords")
+                                    table = ssw_out.create_table(user, 'pixel_coords', UserPixelCoords,
+                                                                 title="Pixel coords")
                                     # Assign the annotation to the table
                                     coord = table.row
                                     for p in val['points']:
@@ -393,13 +420,29 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                                     submission_count += 1
 
                         # Now add on the collected annotations to the assets group.
-                        table = ssw_out.create_table(asset_group, 'pixel_coords', all_pixel_coords, title="Pixel coords")
+                        table = ssw_out.create_table(asset_group, 'pixel_coords', AllPixelCoords, title="Pixel coords")
                         # Assign all elements to this row
                         coord = table.row
                         for x, y, w in zip(all_x_pix, all_y_pix, all_user_weight):
                             coord['x'] = x
                             coord['y'] = y
                             coord['weight'] = w
+                            coord.append()
+                        # Write to file.
+                        table.flush()
+
+                        # Now use kernal density estimation and image processing to identify pixel coordinates of the
+                        # CME front.
+                        coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
+                        cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thresh=10)
+
+                        table = ssw_out.create_table(asset_group, 'cme_front_pixels', CMEFrontPixelCoords,
+                                                     title="Pixel coords of CME front")
+                        # Assign all elements to this row
+                        coord = table.row
+                        for idr, row in cme_coords.iterrows():
+                            coord['x'] = np.int(row['x'])
+                            coord['y'] = np.int(row['y'])
                             coord.append()
                         # Write to file.
                         table.flush()
@@ -438,21 +481,27 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
         os.remove(ssw_out_name)
 
     # PyTables Table definition for a users pixels
-    class user_pixel_coords(tables.IsDescription):
+    class UserPixelCoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
 
     # PyTables Table definition for all users pixels, with added weight, based on number of points in users profile.
-    class all_pixel_coords(tables.IsDescription):
+    class AllPixelCoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
         weight = tables.Int32Col()  # 32-bit integer
 
+    # PyTables Table definition for a users pixels
+    class CMEFrontPixelCoords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+
     # Create the hdf5 output file
-    ssw_out = tables.open_file(ssw_out_name, mode = "w", title = "Test file")
+    title = "SolarStormwatch CME classifications for {}".format(username)
+    ssw_out = tables.open_file(ssw_out_name, mode="w", title=title)
 
     # Loop through the event tree, making relevant groups in the ssw_out file.
-    # Group structure:
+    # Group structure: Event: Craft: Img type: All classifications: Individual classifications
 
     for event_key, craft in event_tree.iteritems():
         event_group = ssw_out.create_group("/", event_key)
@@ -504,7 +553,8 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                                     clas_key = "classification_{}".format(submission_count)
                                     clas = ssw_out.create_group(clas_group, clas_key)
                                     # Make a table for this users annotation
-                                    table = ssw_out.create_table(clas, 'pixel_coords', user_pixel_coords, title="Pixel coords")
+                                    table = ssw_out.create_table(clas, 'pixel_coords', UserPixelCoords,
+                                                                 title="Pixel coords")
                                     # Assign the annotation to the table
                                     coord = table.row
                                     for p in val['points']:
@@ -527,7 +577,7 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                                     submission_count += 1
 
                         # Now add on the collected annotations to the assets group.
-                        table = ssw_out.create_table(asset_group, 'pixel_coords', all_pixel_coords, title="Pixel coords")
+                        table = ssw_out.create_table(asset_group, 'pixel_coords', AllPixelCoords, title="Pixel coords")
                         # Assign all elements to this row
                         coord = table.row
                         for x, y, w in zip(all_x_pix, all_y_pix, all_user_weight):
@@ -538,7 +588,83 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                         # Write to file.
                         table.flush()
 
+                        # Now use kernal density estimation and image processing to identify pixel coordinates of the
+                        # CME front.
+                        coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
+                        cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thresh=10)
+
+                        table = ssw_out.create_table(asset_group, 'cme_front_pixels', CMEFrontPixelCoords,
+                                                     title="Pixel coords of CME front")
+                        # Assign all elements to this row
+                        coord = table.row
+                        for idr, row in cme_coords.iterrows():
+                            coord['x'] = np.int(row['x'])
+                            coord['y'] = np.int(row['y'])
+                            coord.append()
+                        # Write to file.
+                        table.flush()
+
     ssw_out.close()
+
+
+def kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thresh=10):
+    """
+    A function that uses Kernal density estimation and skeletonization to estimate the CME front location from the
+    cloud of classifications for this asset.
+    :param coords: Dataframe of classification coordinates, with columns 'x', and 'y' for the x pixels and y pixels.
+    :param kernel: String name of any valid kernal in scikit-learn.neighbours.KernalDensity.
+    :param bandwidth: Float value of the bandwidth to be used by the kernal. Defaults to 40 pixels, as this is
+                      approximately the error in classifications if made using a touchscreen.
+    :param thresh: Float value of threshold to apply to the density map to identify the CME skeleton. Defaults to 10,
+                   but this is only from playing around and hasn't been thoroughly testted.
+    :return: coords: A dataframe with columns 'x' and 'y', identifying to skeleton of the classifications distribution.
+    """
+    if coords.shape[0] < 20:
+        print("Error: <20 coordinates provided, CME front identification likely to be poor")
+
+    if kernel not in set(["gaussian", "tophat", "epanechnikov", "exponential", "linear", "cosine"]):
+        print("Error: invalid kernel, defaulting to epanechnikov")
+        kernel = "epanechnikov"
+
+    if not isinstance(bandwidth, (int, float)):
+        print("Error: bandwidth should be an int or float number. defaulting to 40")
+        bandwidth = 40
+
+    if not isinstance(thresh, (int, float)):
+        print("Error: thresh should be an int or float number. defaulting to 10")
+        bandwidth = 10
+
+    # Get all pixel coordinates in the image frame.
+    x = np.arange(0, 1024)
+    y = np.arange(0, 1024)
+    xm, ym = np.meshgrid(x, y)
+    all_coords = np.vstack([xm.ravel(), ym.ravel()]).T
+
+    # Parse classification cloud to kernel density estimator. Returns log of density.
+    xy = np.vstack([coords['x'].values.ravel(), coords['y'].values.ravel()]).T
+    fit_distribution = True
+    if xy.shape[0] == 0:
+        fit_distribution = False
+
+    if fit_distribution:
+        kde = KernelDensity(kernel=kernel, bandwidth=bandwidth).fit(xy)
+        log_pdf = np.reshape(kde.score_samples(all_coords), xm.shape)
+
+        # Convert the pdf to a binary map of where the distribution is > np.max(dist)/thresh
+        pdf = np.exp(log_pdf.copy())
+        thresh = np.max(pdf) / thresh
+        pdf_binary = pdf.copy()
+        pdf_binary[pdf_binary < thresh] = 0
+        pdf_binary[pdf_binary >= thresh] = 1
+        # Use scikit-image skeletonize to get skeleton of the binary map, pull out pixel coordinates and output to dataframe
+        skel = skeletonize(pdf_binary)
+        cme_coords = np.nonzero(skel)
+        cme_coords_df = pd.DataFrame({'x':cme_coords[1], 'y':cme_coords[0]})
+    else:
+        # Set bad values to 99999, as pytables can't handle NaN
+        cme_coords_df = pd.DataFrame({'x': 99999, 'y': 99999}, index=[0])
+
+    return cme_coords_df
 
 
 def test_plot():
@@ -572,8 +698,14 @@ def test_plot():
                 norm = mpl.colors.Normalize(vmin=0, vmax=len(times._v_groups))
                 cmap = mpl.cm.viridis
                 for frame_count, t in enumerate(times):
-                    coords = pd.DataFrame.from_records(t.pixel_coords.read())
-                    ax[i].plot(coords['x'], coords['y'], 'o', color=cmap(norm(frame_count)))
+                    all_coords = pd.DataFrame.from_records(t.pixel_coords.read())
+
+                    cme_coords = pd.DataFrame.from_records(t.cme_front_pixels.read())
+                    cme_coords.replace(to_replace=[99999], value=np.NaN, inplace=True)
+
+                    ax[i].plot(cme_coords['x'], cme_coords['y'], '.', color=cmap(norm(frame_count)))
+                    ax[i].plot(all_coords['x'], all_coords['y'], 'o', color=cmap(norm(frame_count)))
+
 
                 # Label it up and format
                 ax[i].set_title("Tracked in {0} {1} image".format(craft_k, img_k))
@@ -620,11 +752,19 @@ def test_animation():
             norm = mpl.colors.Normalize(vmin=0, vmax=len(diff_times._v_groups))
             cmap = mpl.cm.viridis
             for frame_count, (norm_t, diff_t) in enumerate(zip(norm_times, diff_times)):
-                norm_coords = pd.DataFrame.from_records(norm_t.pixel_coords.read())
-                ax[0].plot(norm_coords['x'], norm_coords['y'], 'o', color=cmap(norm(frame_count)))
+                norm_all = pd.DataFrame.from_records(norm_t.pixel_coords.read())
+                norm_cme = pd.DataFrame.from_records(norm_t.cme_front_pixels.read())
+                norm_cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
 
-                diff_coords = pd.DataFrame.from_records(diff_t.pixel_coords.read())
-                ax[1].plot(diff_coords['x'], diff_coords['y'], 'o', color=cmap(norm(frame_count)))
+                ax[0].plot(norm_cme['x'], norm_cme['y'], '.', color=cmap(norm(frame_count)))
+                ax[0].plot(norm_all['x'], norm_all['y'], 'o', color=cmap(norm(frame_count)), alpha=0.5)
+
+                diff_all = pd.DataFrame.from_records(diff_t.pixel_coords.read())
+                diff_cme = pd.DataFrame.from_records(diff_t.cme_front_pixels.read())
+                diff_cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
+
+                ax[1].plot(diff_cme['x'], diff_cme['y'], '.', color=cmap(norm(frame_count)))
+                ax[1].plot(diff_all['x'], diff_all['y'], 'o', color=cmap(norm(frame_count)), alpha=0.5)
 
                 # Label it up and format
                 for a,img_k in zip(ax, ["norm", "diff"]):
@@ -653,163 +793,85 @@ def test_animation():
                 os.remove(f)
 
 
-def test_front_density():
-    """
-    A function to load in the test version of the HDF5 stormwatch data and produce a test plot.
-    :return:
-    """
-    project_dirs = get_project_dirs()
-    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
-
-    # Load in the event tree dictionary to easily iterate over the events/craft/img type
-    ssw_event_tree = get_event_subject_tree(active=True)
-
-    # get handle to the ssw out data
-    ssw_out = tables.open_file(ssw_out_name, mode="r")
-
-    x = np.arange(0,1024)
-    y = np.arange(0, 1024)
-    xm, ym = np.meshgrid(x, y)
-    all_coords = np.vstack([xm.ravel(), ym.ravel()]).T
-
-    # Loop over events and craft
-    for event_k, event in ssw_event_tree.iteritems():
-
-        if event_k != "ssw_009":
-            continue
-
-        for craft_k, craft in event.iteritems():
-
-            # Get path to the normal and diff img types of this event, pull out the group of times
-            norm_path = "/".join(['', event_k, craft_k, 'norm'])
-            norm_times = ssw_out.get_node(norm_path)
-
-            diff_path = "/".join(['', event_k, craft_k, 'diff'])
-            diff_times = ssw_out.get_node(diff_path)
-
-            # Set up the normalisation and colormap for the plots
-            norm = mpl.colors.Normalize(vmin=0, vmax=len(diff_times._v_groups))
-            cmap = mpl.cm.viridis
-            for frame_count, (norm_t, diff_t) in enumerate(zip(norm_times, diff_times)):
-                # Get the normal and diff coords
-                norm_coords = pd.DataFrame.from_records(norm_t.pixel_coords.read())
-                diff_coords = pd.DataFrame.from_records(diff_t.pixel_coords.read())
-                xy = np.vstack([norm_coords['x'].values.ravel(), norm_coords['y'].values.ravel()]).T
-                # Fit a KDE to these points
-                # 20-fold cross-validation
-                if norm_coords.shape[0] < 20:
-                    continue
-
-                grid = GridSearchCV(KernelDensity(), {'bandwidth': np.linspace(1, 10.0, 30)})
-                grid.fit(xy)
-                print grid.best_params_
-                kde = grid.best_estimator_
-                pdf = np.reshape(kde.score_samples(all_coords),xm.shape)
-
-                # Mark on the points
-                fig, ax = plt.subplots(1, 2, figsize=(15, 7))
-                ax[0].contourf(xm, ym, pdf, cmap=cmap)
-                ax[1].contourf(xm, ym, pdf, cmap=cmap)
-                ax[0].plot(norm_coords['x'], norm_coords['y'], 'o', color='r')
-                ax[1].plot(diff_coords['x'], diff_coords['y'], 'o', color='r')
-                plt.show()
-                # Label it up and format
-                for a, img_k in zip(ax, ["norm", "diff"]):
-                    a.set_title("Tracked in {0} {1} image".format(craft_k, img_k))
-                    a.set_xlim(0, 1023)
-                    a.set_ylim(0, 1023)
-                    a.set_aspect('equal')
-
-                # Save and move to next plot
-                plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-                name = "_".join([event_k, craft_k, "ani_f{0:03d}.jpg".format(frame_count)])
-                name = os.path.join(project_dirs['figs'], name)
-                plt.savefig(name)
-                plt.close('all')
-            break
-        break
-        # Make animation and clean up.
-        for craft in ['sta', 'stb']:
-            src = os.path.join(project_dirs['figs'], event_k + "_" + craft + "*_ani*.jpg")
-            dst = os.path.join(project_dirs['figs'], event_k + "_" + craft + "_front_id_test.gif")
-            cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
-            os.system(cmd)
-            # Tidy.
-            files = glob.glob(src)
-            for f in files:
-                os.remove(f)
-
-
 def test_front_reconstruction():
     """
     A function to load in the test version of the HDF5 stormwatch data and produce a test plot.
     :return:
     """
+
     project_dirs = get_project_dirs()
-    out_hdf5_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    # Get the swpc cme database
+    swpc_cmes = load_swpc_events()
 
-    hdf = h5py.File(out_hdf5_name, "r")
-    ssw_event = 'ssw_009'
-    craft = 'sta'
-    im_type = 'diff'
-    path = "/".join(['', ssw_event, craft, im_type])
-    data = hdf[path]
+    # Import the SSW classifications data
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    ssw_out = tables.open_file(ssw_out_name, mode="r")
 
-    # Use data keys to get times, then make time pa DF to store front elongation in.
+    # Iterate through the events, and annotate storm position on each plot.
+    for event in ssw_out.iter_nodes('/'):
 
-    # Loop through the times.
-    # >>> Find relevant fits file. - done
-    # >>> Get HPR coordinates. - done
-    # >>> Convert the pixel coordinates to HPR coordinates. - done
-    # >>> Loop through PA grid - done
-    # >>> ^^^ Find points in this PA window. - done
-    # >>> ^^^ KS density fit to elongation of these points. - done
-    # >>> ^^^ Find elongation of maximum of estimated dist. - done
-    # >>> ^^^ Append to DF - done
-    # >>> Use Storm front DF to add in pa,elongation and pixel coords of the Stormfront to the HDF dataframe.
-    # >>> Should I spline gaps in the storm front profile? In HPR coords this may not be a bad fit, as pretty linear.
+        # Get ssw event number to loop up event HI start and stop time.
+        ssw_num = int(event._v_name.split('_')[1])
 
-    # Get pa bin
-    pa_bin_wid = 5
-    pa_bins = np.arange(50, 130, pa_bin_wid)
-    pa_tol = pa_bin_wid / 2.0
-    # El values to loop up dist at.
-    el_bins = np.arange(4, 25, 0.1)
+        for craft in event:
 
-    columns  = {t:pd.Series(data=np.zeros(pa_bins.size)) for t in data.iterkeys()}
-    storms = pd.DataFrame(data=columns, index=pa_bins)
-    del columns
+            if craft._v_name == 'sta':
+                t_start = swpc_cmes.loc[ssw_num, 't_hi1a_start']
+                t_stop = swpc_cmes.loc[ssw_num, 't_hi1a_stop']
+            elif craft._v_name == 'stb':
+                t_start = swpc_cmes.loc[ssw_num, 't_hi1b_start']
+                t_stop = swpc_cmes.loc[ssw_num, 't_hi1b_stop']
 
-    for t, anno in data.iteritems():
+            hi_files = hip.find_hi_files(t_start, t_stop, craft=craft._v_name, camera='hi1', background_type=1)
 
-        t_start = pd.to_datetime(t)
-        files = hip.find_hi_files(t_start, t_start, craft=craft, camera='hi1', background_type=1 )
-        files = files[0]
-        print files
-        himap = hip.get_image_plain(files, star_suppress=False)
+            files_c = hi_files[1:]
+            files_p = hi_files[0:-1]
 
-        # Convert classifications from pixels to to HPR coords.
-        x = np.array(anno['x_pix'][...]) * u.pix
-        y = np.array(anno['y_pix'][...]) * u.pix
-        el, pa = hip.convert_pix_to_hpr(x, y, himap)
+            for img_type in craft:
 
-        # Loop through position angles, find points in that bin, work out elongation distribution, get mode.
-        for pab in pa_bins:
-            el_sub = el[ (pa.value >= pab - pa_tol) & (pa.value <= pab + pa_tol)]
-            if len(el_sub) >= 5:
-                kernal = stats.gaussian_kde(el_sub.value)
-                el_dist = kernal(el_bins)
-                el_consensus = el_bins[np.argmax(el_dist)]
-                # plt.figure()
-                # plt.plot(el_bins, el_dist,'k-')
-                # plt.plot(el_sub, np.zeros(el_sub.size), 'r.')
-                # ylims = plt.gca().get_ylim()
-                # plt.vlines(el_consensus, ylims[0], ylims[1], colors='b')
-                # plt.ylim(ylims[0], ylims[1])
-                # plt.show()
-            else:
-                el_consensus = np.NaN
+                for fc, fp in zip(files_c, files_p):
 
-            # Assign to storms
-            storms.loc[pab,t] = el_consensus
+                    if img_type._v_name == 'norm':
+                        # Get Sunpy map of the image, convert to grayscale image with plain_normalise
+                        hi_map = hip.get_image_plain(fc, star_suppress=False)
+                        normalise = mpl.colors.Normalize(vmin=0.0, vmax=0.5)
+                        img = mpl.cm.gray(normalise(hi_map.data), bytes=True)
+                    elif img_type._v_name == 'diff':
+                        hi_map = hip.get_image_diff(fc, fp, align=True, smoothing=True)
+                        normalise = mpl.colors.Normalize(vmin=-0.05, vmax=0.05)
+                        img = mpl.cm.gray(normalise(hi_map.data), bytes=True)
 
+                    fig,ax = plt.subplots()
+                    plt.imshow(img, origin='lower')
+
+                    try:
+                        # Get the time node for this file.
+                        time_label = hi_map.date.strftime('T%Y%m%d_%H%M%S')
+                        time = img_type._f_get_child(time_label)
+                        all = pd.DataFrame.from_records(time.pixel_coords.read())
+                        cme = pd.DataFrame.from_records(time.cme_front_pixels.read())
+                        cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
+                        plt.plot(cme['x'], cme['y'], '.', color='r' )
+                        plt.plot(all['x'], all['y'], 'o', color='y', alpha=0.5)
+                    except:
+                        print('Bugger')
+
+                    plt.xlim(0,1023)
+                    plt.ylim(0, 1023)
+                    ax.get_xaxis().set_visible(False)
+                    ax.get_yaxis().set_visible(False)
+                    out_name = "_".join([event._v_name, craft._v_name, img_type._v_name,
+                                         hi_map.date.strftime('%Y%m%d_%H%M%S'), 'plus_CME']) + '.jpg'
+                    out_path = os.path.join(project_dirs['figs'], out_name)
+                    plt.savefig(out_path, bbox_inches='tight', pad_inches=0)
+                    plt.close('all')
+
+                src = os.path.join(project_dirs['figs'], '*plus_CME.jpg')
+                gif_name = "_".join([event._v_name, craft._v_name, img_type._v_name, 'front_id_test.gif'])
+                dst = os.path.join(project_dirs['figs'], gif_name)
+                cmd = " ".join(["convert -delay 0 -loop 0 ", src, dst])
+                os.system(cmd)
+                # Tidy.
+                files = glob.glob(src)
+                for f in files:
+                    os.remove(f)
