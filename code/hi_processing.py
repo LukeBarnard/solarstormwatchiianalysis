@@ -428,3 +428,4 @@ def convert_hpr_to_pix(el, pa, himap):
     lon, lat = convert_hpc_to_hpr(el, pa)
     x, y = himap.data_to_pixel(lon, lat)
     return x, y
+

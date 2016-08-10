@@ -10,6 +10,7 @@ import pandas as pd
 import simplejson as json
 from sklearn.neighbors import KernelDensity
 from skimage.morphology import skeletonize
+from skimage import measure
 
 
 def get_project_dirs():
@@ -89,11 +90,15 @@ def import_classifications(latest=True, version=None):
     project_dirs = get_project_dirs()
     # Load in classifications:
     # Get converters for each column:
-    converters = dict(classification_id=int, user_name=str, user_id=int, user_ip=str, workflow_id=int,
+    converters = dict(classification_id=int, user_name=str, user_ip=str, workflow_id=int,
                       workflow_name=str, workflow_version=float, created_at=str, gold_standard=str, expert=str,
                       metadata=json.loads, annotations=json.loads, subject_data=json.loads, subject_ids=str)
     # Load the classifications into DataFrame and get latest subset if needed.
     data = pd.read_csv(project_dirs['classifications'], converters=converters)
+
+    # Correct empty user_ids and convert to integers.
+    data['user_id'].replace(to_replace=[np.NaN],value=-1, inplace=True)
+    data['user_id'].astype(int)
 
     # Convert the subject ids, which are a variable length list of subject_ids. Because of setup of workflow
     # these numbers just repeat. Only need first.
@@ -622,7 +627,7 @@ def kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thres
     if coords.shape[0] < 20:
         print("Error: <20 coordinates provided, CME front identification likely to be poor")
 
-    if kernel not in set(["gaussian", "tophat", "epanechnikov", "exponential", "linear", "cosine"]):
+    if kernel not in {"gaussian", "tophat", "epanechnikov", "exponential", "linear", "cosine"}:
         print("Error: invalid kernel, defaulting to epanechnikov")
         kernel = "epanechnikov"
 
@@ -649,15 +654,30 @@ def kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thres
     if fit_distribution:
         kde = KernelDensity(kernel=kernel, bandwidth=bandwidth).fit(xy)
         log_pdf = np.reshape(kde.score_samples(all_coords), xm.shape)
-
         # Convert the pdf to a binary map of where the distribution is > np.max(dist)/thresh
         pdf = np.exp(log_pdf.copy())
         thresh = np.max(pdf) / thresh
         pdf_binary = pdf.copy()
         pdf_binary[pdf_binary < thresh] = 0
         pdf_binary[pdf_binary >= thresh] = 1
-        # Use scikit-image skeletonize to get skeleton of the binary map, pull out pixel coordinates and output to dataframe
-        skel = skeletonize(pdf_binary)
+        # Only keep the largest CME feature in the binary map.
+        # Label each binary blob
+        pdf_binary_label = measure.label(pdf_binary.astype(int))
+        # update label so that the background pixels have the same label of zero
+        pdf_binary_label[pdf_binary == 0] = 0
+
+        # Find how many unique labels and how many pixels in each label
+        lab, cnt = np.unique(pdf_binary_label, return_counts=True)
+        # Sort these so largest is last in list.
+        # Largest should always be the background. So keep two largest - background and clearest CME identification
+        lab = lab[np.argsort(cnt)]
+        for l in lab[:-2]:
+            pdf_binary_label[pdf_binary_label == l] = 0
+
+        # Set the largest blob back to 1 rather than it's label.
+        pdf_binary_label[pdf_binary_label != 0] = 1
+        # Use scikit-image skeletonize to get skeleton of the binary map, get pixel coordinates and output to dataframe
+        skel = skeletonize(pdf_binary_label)
         cme_coords = np.nonzero(skel)
         cme_coords_df = pd.DataFrame({'x':cme_coords[1], 'y':cme_coords[0]})
     else:
@@ -705,7 +725,6 @@ def test_plot():
 
                     ax[i].plot(cme_coords['x'], cme_coords['y'], '.', color=cmap(norm(frame_count)))
                     ax[i].plot(all_coords['x'], all_coords['y'], 'o', color=cmap(norm(frame_count)))
-
 
                 # Label it up and format
                 ax[i].set_title("Tracked in {0} {1} image".format(craft_k, img_k))
@@ -767,7 +786,7 @@ def test_animation():
                 ax[1].plot(diff_all['x'], diff_all['y'], 'o', color=cmap(norm(frame_count)), alpha=0.5)
 
                 # Label it up and format
-                for a,img_k in zip(ax, ["norm", "diff"]):
+                for a, img_k in zip(ax, ["norm", "diff"]):
                     a.set_title("Tracked in {0} {1} image".format(craft_k, img_k))
                     a.set_xlim(0, 1023)
                     a.set_ylim(0, 1023)
@@ -776,7 +795,7 @@ def test_animation():
                 # Save and move to next plot
                 plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
                 name = "_".join([event_k,  craft_k, "ani_f{0:03d}.jpg".format(frame_count)])
-                name = os.path.join(project_dirs['figs'], name )
+                name = os.path.join(project_dirs['figs'], name)
                 plt.savefig(name)
 
             plt.close('all')
@@ -806,6 +825,11 @@ def test_front_reconstruction():
     # Import the SSW classifications data
     ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
     ssw_out = tables.open_file(ssw_out_name, mode="r")
+
+    # Make a directory to store all of these figures in
+    fig_out_dir = os.path.join(project_dirs['figs'], "cme_front_reconstructions")
+    if not os.path.exists(fig_out_dir):
+        os.mkdir(fig_out_dir)
 
     # Iterate through the events, and annotate storm position on each plot.
     for event in ssw_out.iter_nodes('/'):
@@ -862,14 +886,14 @@ def test_front_reconstruction():
                     ax.get_yaxis().set_visible(False)
                     out_name = "_".join([event._v_name, craft._v_name, img_type._v_name,
                                          hi_map.date.strftime('%Y%m%d_%H%M%S'), 'plus_CME']) + '.jpg'
-                    out_path = os.path.join(project_dirs['figs'], out_name)
+                    out_path = os.path.join(fig_out_dir, out_name)
                     plt.savefig(out_path, bbox_inches='tight', pad_inches=0)
                     plt.close('all')
 
-                src = os.path.join(project_dirs['figs'], '*plus_CME.jpg')
+                src = os.path.join(fig_out_dir, '*plus_CME.jpg')
                 gif_name = "_".join([event._v_name, craft._v_name, img_type._v_name, 'front_id_test.gif'])
-                dst = os.path.join(project_dirs['figs'], gif_name)
-                cmd = " ".join(["convert -delay 0 -loop 0 ", src, dst])
+                dst = os.path.join(fig_out_dir, gif_name)
+                cmd = " ".join(["convert -delay 20 -loop 0 ", src, dst])
                 os.system(cmd)
                 # Tidy.
                 files = glob.glob(src)
