@@ -7,4 +7,4 @@ subjects,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stor
 workflows,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-workflows.csv
 workflow_contents,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\data\solar-stormwatch-ii-workflow_contents.csv
 out_data,C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\out_data
-hi_data,E:\STEREO\ares.nrl.navy.mil\lz
+hi_data,F:\STEREO\ares.nrl.navy.mil\lz

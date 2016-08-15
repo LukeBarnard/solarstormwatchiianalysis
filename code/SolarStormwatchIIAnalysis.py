@@ -18,8 +18,8 @@ def get_project_dirs():
     A function to load in dictionary of project directories stored in a config.txt file stored in the
     :return proj_dirs: Dictionary of project directories, with keys 'data','figures','code', and 'results'.
     """
-    files = glob.glob('project_directories.txt')
-
+    files = glob.glob('C:\Users\Luke\PycharmProjects\SolarStormwatchIIAnalysis\code\project_directories.txt')
+    
     if len(files) != 1:
         # If too few or too many config files, guess projdirs
         print('Error: Cannot find correct config file with project directories. Assuming typical structure')
@@ -313,7 +313,6 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
     :param latest: Bool, If true only processes classifications from the latest version of the workflow
     :return:
     """
-
     project_dirs = get_project_dirs()
 
     # Get classifications from latest workflow
@@ -329,36 +328,42 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
     if os.path.exists(ssw_out_name):
         os.remove(ssw_out_name)
 
-    # PyTables Table definition for a users pixels
-    class UserPixelCoords(tables.IsDescription):
-        x = tables.Int32Col()  # 32-bit integer
-        y = tables.Int32Col()  # 32-bit integer
-
-    # PyTables Table definition for all users pixels, with added weight, based on number of points in users profile.
-    class AllPixelCoords(tables.IsDescription):
-        x = tables.Int32Col()  # 32-bit integer
-        y = tables.Int32Col()  # 32-bit integer
-        weight = tables.Int32Col()  # 32-bit integer
-
-    # PyTables Table definition for all users pixels, with added weight, based on number of points in users profile.
-    class CMEFrontPixelCoords(tables.IsDescription):
-        x = tables.Int32Col()  # 32-bit integer
-        y = tables.Int32Col()  # 32-bit integer
-
     # Create the hdf5 output file
     ssw_out = tables.open_file(ssw_out_name, mode="w", title="SolarStormwatch CME classifications for all users")
 
-    # Loop through the event tree, making relevant groups in the ssw_out file.
-    # Group structure: Event: Craft: Img type: All classifications: Individual classifications
+    # Define the table types needed:
+    # Table definition for a users pixels and HPR coords
+    class UserCoords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+        el = tables.Float32Col()  # 32-bit float
+        pa = tables.Float32Col()  # 32-bit float
 
+    # Table definition for all users pixels and HPR coords, with added weight, based on num of points in users profile.
+    class AllCoords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+        weight = tables.Int32Col()  # 32-bit integer
+        el = tables.Float32Col()  # 32-bit float
+        pa = tables.Float32Col()  # 32-bit float
+
+    # Table definition for CME Front in pixel and HPR coordinates.
+    class CMECoords(tables.IsDescription):
+        x = tables.Int32Col()  # 32-bit integer
+        y = tables.Int32Col()  # 32-bit integer
+        el = tables.Float32Col()  # 32-bit float
+        pa = tables.Float32Col()  # 32-bit float
+
+    # Loop through the event tree, making relevant groups in the ssw_out file.
+    # Group structure: Event> Craft> Img type> All classifications> User classifications
     for event_key, craft in event_tree.iteritems():
-        event_group = ssw_out.create_group("/", event_key)
+        event_group = ssw_out.create_group("/", event_key, event_key)
 
         for craft_key, im_type in craft.iteritems():
-            craft_group = ssw_out.create_group(event_group, craft_key)
+            craft_group = ssw_out.create_group(event_group, craft_key, craft_key)
 
             for im_key, subjects in im_type.iteritems():
-                im_group = ssw_out.create_group(craft_group, im_key)
+                im_group = ssw_out.create_group(craft_group, im_key, im_key)
 
                 for sub in subjects:
                     # Get the subjects for this subject_id
@@ -373,18 +378,39 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                         asset_key = "asset_{}".format(asset_id)
                         # Form a timestring for the hdf5 branch name
                         file_parts = os.path.splitext(meta[asset_key])[0].split('_')
-                        time_string = "T" + "_".join(file_parts[6:8])
-                        time_string_iso = pd.datetime.strptime(time_string, 'T%Y%m%d_%H%M%S').isoformat()
+                        if file_parts[7][2:4] in {'09', '29', '49'}:
+                            hhmmss = file_parts[7][0:4] + '01'
+                        else:
+                            # Add in a correction for an error in the asset names that makes file times offset from
+                            # the HI data source. All data file times end 0901, 4901 or 2901.
+                            # Force to make it easier to look up files. This handles known cases, but maybe not all.
+                            if file_parts[7][2:4] == '10':
+                                hhmmss = file_parts[7][0:2] + '0901'
+                            if file_parts[7][2:4] == '30':
+                                hhmmss = file_parts[7][0:2] + '2901'
+                            if file_parts[7][2:4] == '50':
+                                hhmmss = file_parts[7][0:2] + '4901'
+
+                        time_string = "T" + "_".join([file_parts[6], hhmmss])
+                        asset_time = pd.datetime.strptime(time_string, 'T%Y%m%d_%H%M%S')
+
+                        label = "_".join([event_key, craft_key, im_key,time_string])
+                        print label
+
+                        # Get the HI file and sunpy map for this asset
+                        hi_files = hip.find_hi_files(asset_time, asset_time, craft=craft_key,
+                                                     camera='hi1', background_type=1)
+                        asset_hi_map = hip.get_image_plain(hi_files[0])
 
                         # Make a group for this asset
-                        asset_group = ssw_out.create_group(im_group, time_string, title=time_string_iso)
-
-                        # Form lists for storing all of the user classifications, id numbers and weight
+                        asset_group = ssw_out.create_group(im_group, time_string, title=asset_time.isoformat())
+                        # Form lists for storing all of the user classifications, id numbers and weights
                         all_x_pix = []
                         all_y_pix = []
+                        all_hpr_el = []
+                        all_hpr_pa = []
                         all_user_weight = []
                         all_user = []
-
                         # Counter for the number of submissions on this asset
                         submission_count = 0
                         # Iterate through classification rows to find annotations on this asset
@@ -400,58 +426,87 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                                     # Create a group for this user
                                     user_key = "user_{}".format(submission_count)
                                     user = ssw_out.create_group(users_group, user_key)
-                                    # Make a table for this users annotation
-                                    table = ssw_out.create_table(user, 'pixel_coords', UserPixelCoords,
-                                                                 title="Pixel coords")
-                                    # Assign the annotation to the table
+
+                                    # Get the pixel coordinates
+                                    user_x_pix = [int(p['x']) for p in val['points']]
+                                    user_y_pix = [1023 - int(p['y']) for p in val['points']]
+                                    # Convert to HPR
+                                    user_el, user_pa = hip.convert_pix_to_hpr(user_x_pix*u.pix, user_y_pix*u.pix,
+                                                                              asset_hi_map)
+                                    # Loose the units and convert to float32
+                                    user_el = np.array(user_el.value, dtype=np.float32)
+                                    user_pa = np.array(user_pa.value, dtype=np.float32)
+
+                                    # Make a tables for this users annotation and get pointer
+                                    table = ssw_out.create_table(user, 'coords', UserCoords,
+                                                                 expectedrows=len(user_x_pix),
+                                                                 title="Pixel adn HPR Coords")
                                     coord = table.row
-                                    for p in val['points']:
-                                        coord['x'] = int(p['x'])
-                                        coord['y'] = 1023-int(p['y'])
+                                    # Append the data
+                                    for x, y, el, pa in zip(user_x_pix, user_y_pix, user_el, user_pa):
+                                        coord['x'] = x
+                                        coord['y'] = y
+                                        coord['el'] = el
+                                        coord['pa'] = pa
                                         coord.append()
-                                    # Write to file.
+                                    # Write to file
                                     table.flush()
 
                                     # Dump users data into collection of annotations.
                                     # Get the data for this user classification
-                                    user_x_pix = [int(p['x']) for p in val['points']]
-                                    user_y_pix = [1023 - int(p['y']) for p in val['points']]
                                     user_weight = np.zeros(len(user_x_pix), dtype=int) + len(user_x_pix)
                                     user_id = cla['user_id']
                                     all_x_pix.extend(user_x_pix)
                                     all_y_pix.extend(user_y_pix)
+                                    all_hpr_el.extend(user_el.tolist())
+                                    all_hpr_pa.extend(user_pa.tolist())
                                     all_user_weight.extend(user_weight)
                                     all_user.append(user_id)
                                     submission_count += 1
 
                         # Now add on the collected annotations to the assets group.
-                        table = ssw_out.create_table(asset_group, 'pixel_coords', AllPixelCoords, title="Pixel coords")
-                        # Assign all elements to this row
+                        # Make table and get pointer
+                        table = ssw_out.create_table(asset_group, 'coords', AllCoords,
+                                                         expectedrows=len(all_x_pix), title="Pixel and HPR coords")
                         coord = table.row
-                        for x, y, w in zip(all_x_pix, all_y_pix, all_user_weight):
+                        for x, y, el, pa, w in zip(all_x_pix, all_y_pix, all_hpr_el, all_hpr_pa, all_user_weight):
                             coord['x'] = x
                             coord['y'] = y
+                            coord['el'] = el
+                            coord['pa'] = pa
                             coord['weight'] = w
                             coord.append()
                         # Write to file.
                         table.flush()
 
-                        # Now use kernal density estimation and image processing to identify pixel coordinates of the
-                        # CME front.
-                        coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
-                        cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thresh=10)
 
-                        table = ssw_out.create_table(asset_group, 'cme_front_pixels', CMEFrontPixelCoords,
-                                                     title="Pixel coords of CME front")
-                        # Assign all elements to this row
+                        coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
+                        # Now use kernal density estimation to identify pixel coordinates of the CME front.
+                        cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40,
+                                                               thresh=10)
+                        if len(cme_coords)>0:
+                            # Also get the HPR coords of CME front.
+                            el, pa = hip.convert_pix_to_hpr(cme_coords['x'].values*u.pix, cme_coords['y'].values*u.pix,
+                                                            asset_hi_map)
+                            cme_coords['el'] = el.value
+                            cme_coords['pa'] = pa.value
+                        else:
+                            # Set invalid values
+                            cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'el': 99999, 'pa': 99999}, index=[0])
+
+                        # Now store the CME front coords: Get table and pointer
+                        table = ssw_out.create_table(asset_group, 'cme_coords', CMECoords,expectedrows=len(cme_coords),
+                                                     title="Pixel and HPR coords of CME front")
                         coord = table.row
-                        for idr, row in cme_coords.iterrows():
-                            coord['x'] = np.int(row['x'])
-                            coord['y'] = np.int(row['y'])
+                        # Loop through cme coords and write to file.
+                        for idr, cme_row in cme_coords.iterrows():
+                            coord['x'] = np.int(cme_row['x'])
+                            coord['y'] = np.int(cme_row['y'])
+                            coord['el'] = np.float32(cme_row['el'])
+                            coord['pa'] = np.float32(cme_row['pa'])
                             coord.append()
                         # Write to file.
                         table.flush()
-
     ssw_out.close()
 
 
@@ -464,7 +519,6 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
     :param latest: Bool, If true only processes classifications from the latest version of the workflow
     :return:
     """
-
     project_dirs = get_project_dirs()
 
     # Get classifications from latest workflow
@@ -486,7 +540,7 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
         os.remove(ssw_out_name)
 
     # PyTables Table definition for a users pixels
-    class UserPixelCoords(tables.IsDescription):
+    class PixelCoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
 
@@ -496,10 +550,11 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
         y = tables.Int32Col()  # 32-bit integer
         weight = tables.Int32Col()  # 32-bit integer
 
-    # PyTables Table definition for a users pixels
-    class CMEFrontPixelCoords(tables.IsDescription):
-        x = tables.Int32Col()  # 32-bit integer
-        y = tables.Int32Col()  # 32-bit integer
+    # PyTables Table definition for a users HPR coordinates
+    class HPRCoords(tables.IsDescription):
+        el = tables.Float32Col()  # 32-bit float
+        pa = tables.Float32Col()  # 32-bit float
+
 
     # Create the hdf5 output file
     title = "SolarStormwatch CME classifications for {}".format(username)
@@ -530,15 +585,34 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                         asset_key = "asset_{}".format(asset_id)
                         # Form a timestring for the hdf5 branch name
                         file_parts = os.path.splitext(meta[asset_key])[0].split('_')
-                        time_string = "T" + "_".join(file_parts[6:8])
-                        time_string_iso = pd.datetime.strptime(time_string, 'T%Y%m%d_%H%M%S').isoformat()
+                        if file_parts[7][2:4] in {'09', '29', '49'}:
+                            hhmmss = file_parts[7][0:4] + '01'
+                        else:
+                            # Add in a correction to for an error in the asset names that makes file times offset from
+                            # the HI data source. All data files end at 0901, 4901 or 2901. So force to this format
+                            # to make it easier to look up files.
+                            if file_parts[7][2:4] == '10':
+                                hhmmss = file_parts[7][0:2] + '0901'
+                            if file_parts[7][2:4] == '30':
+                                hhmmss = file_parts[7][0:2] + '2901'
+                            if file_parts[7][2:4] == '50':
+                                hhmmss = file_parts[7][0:2] + '4901'
+
+                        time_string = "T" + "_".join([file_parts[6], hhmmss])
+                        asset_time = pd.datetime.strptime(time_string, 'T%Y%m%d_%H%M%S')
+                        # Get the HI file and load in a sunpy map.
+                        hi_files = hip.find_hi_files(asset_time, asset_time, craft=craft_key,
+                                                     camera='hi1', background_type=1)
+                        asset_hi_map = hip.get_image_plain(hi_files[0])
 
                         # Make a group for this asset
-                        asset_group = ssw_out.create_group(im_group, time_string, title=time_string_iso)
+                        asset_group = ssw_out.create_group(im_group, time_string, title=asset_time.isoformat())
 
                         # Form lists for storing all of the user classifications, id numbers and weight
                         all_x_pix = []
                         all_y_pix = []
+                        all_hpr_el = []
+                        all_hpr_pa = []
                         all_user_weight = []
                         all_user = []
 
@@ -557,17 +631,33 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                                     # Create a group for this user
                                     clas_key = "classification_{}".format(submission_count)
                                     clas = ssw_out.create_group(clas_group, clas_key)
+
                                     # Make a table for this users annotation
-                                    table = ssw_out.create_table(clas, 'pixel_coords', UserPixelCoords,
-                                                                 title="Pixel coords")
+                                    pix_table = ssw_out.create_table(clas, 'pixel_coords', PixelCoords,
+                                                                     title="Pixel coords")
+
+                                    hpr_table = ssw_out.create_table(clas, 'hpr_coords', HPRCoords,
+                                                                     title="HPR coords")
+
                                     # Assign the annotation to the table
-                                    coord = table.row
+                                    pix_coord = pix_table.row
+                                    hpr_coord = hpr_table.row
                                     for p in val['points']:
-                                        coord['x'] = int(p['x'])
-                                        coord['y'] = 1023-int(p['y'])
-                                        coord.append()
+                                        x = int(p['x'])
+                                        y = 1023 - int(p['y'])
+
+                                        pix_coord['x'] = x
+                                        pix_coord['y'] = y
+                                        pix_coord.append()
+
+                                        el, pa = hip.convert_pix_to_hpr(x*u.pix, y*u.pix, asset_hi_map)
+                                        hpr_coord['el'] = el.value
+                                        hpr_coord['pa'] = pa.value
+                                        hpr_coord.append()
+
                                     # Write to file.
-                                    table.flush()
+                                    pix_table.flush()
+                                    hpr_table.flush()
 
                                     # Dump users data into collection of annotations.
                                     # Get the data for this user classification
@@ -577,38 +667,66 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
                                     user_id = cla['user_id']
                                     all_x_pix.extend(user_x_pix)
                                     all_y_pix.extend(user_y_pix)
+                                    user_el, user_pa = hip.convert_pix_to_hpr(user_x_pix*u.pix, user_y_pix*u.pix,
+                                                                              asset_hi_map)
+                                    all_hpr_el.extend(user_el.value)
+                                    all_hpr_pa.extend(user_pa.value)
                                     all_user_weight.extend(user_weight)
                                     all_user.append(user_id)
                                     submission_count += 1
 
-                        # Now add on the collected annotations to the assets group.
-                        table = ssw_out.create_table(asset_group, 'pixel_coords', AllPixelCoords, title="Pixel coords")
-                        # Assign all elements to this row
-                        coord = table.row
-                        for x, y, w in zip(all_x_pix, all_y_pix, all_user_weight):
-                            coord['x'] = x
-                            coord['y'] = y
-                            coord['weight'] = w
-                            coord.append()
-                        # Write to file.
-                        table.flush()
+                            # Now add on the collected annotations to the assets group.
+                            # Pixel coords first
+                            pix_table = ssw_out.create_table(asset_group, 'pixel_coords', AllPixelCoords,
+                                                                     title="Pixel coords")
+                            # Assign all elements to this row
+                            coord = pix_table.row
+                            for x, y, w in zip(all_x_pix, all_y_pix, all_user_weight):
+                                coord['x'] = x
+                                coord['y'] = y
+                                coord['weight'] = w
+                                coord.append()
+                            # Write to file.
+                            pix_table.flush()
 
-                        # Now use kernal density estimation and image processing to identify pixel coordinates of the
-                        # CME front.
-                        coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
-                        cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thresh=10)
+                            # HPR coords now
+                            hpr_table = ssw_out.create_table(asset_group, 'hpr_coords', HPRCoords,
+                                                            title="HPR coords")
+                            # Assign all elements to this row
+                            coord = hpr_table.row
+                            for el, pa in zip(all_hpr_el, all_hpr_pa):
+                                coord['el'] = el
+                                coord['pa'] = pa
+                                coord.append()
+                            # Write to file.
+                            hpr_table.flush()
 
-                        table = ssw_out.create_table(asset_group, 'cme_front_pixels', CMEFrontPixelCoords,
-                                                     title="Pixel coords of CME front")
-                        # Assign all elements to this row
-                        coord = table.row
-                        for idr, row in cme_coords.iterrows():
-                            coord['x'] = np.int(row['x'])
-                            coord['y'] = np.int(row['y'])
-                            coord.append()
-                        # Write to file.
-                        table.flush()
+                            # Now use kernal density estimation to identify pixel coordinates of the CME front.
+                            coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
+                            cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40,
+                                                                   thresh=10)
 
+                            # Create tables to store the pixel and HPR coords of CME front
+                            pix_table = ssw_out.create_table(asset_group, 'cme_front_pixels',
+                                                            PixelCoords, title="Pixel coords of CME front")
+                            hpr_table = ssw_out.create_table(asset_group, 'cme_front_hpr', HPRCoords,
+                                                             title="HPR coords of CME front")
+                            # Get pointers to these tables
+                            pix_coord = pix_table.row
+                            hpr_coord = hpr_table.row
+                            for idr, row in cme_coords.iterrows():
+                                pix_coord['x'] = np.int(row['x'])
+                                pix_coord['y'] = np.int(row['y'])
+                                pix_coord.append()
+
+                                el, pa = hip.convert_pix_to_hpr(row['x']*u.pix, row['y']*u.pix, asset_hi_map)
+                                hpr_coord['el'] = np.float32(el.value)
+                                hpr_coord['pa'] = np.float32(pa.value)
+                                hpr_coord.append()
+
+                            # Write to file.
+                            pix_table.flush()
+                            hpr_table.flush()
     ssw_out.close()
 
 
@@ -718,13 +836,17 @@ def test_plot():
                 norm = mpl.colors.Normalize(vmin=0, vmax=len(times._v_groups))
                 cmap = mpl.cm.viridis
                 for frame_count, t in enumerate(times):
-                    all_coords = pd.DataFrame.from_records(t.pixel_coords.read())
 
-                    cme_coords = pd.DataFrame.from_records(t.cme_front_pixels.read())
-                    cme_coords.replace(to_replace=[99999], value=np.NaN, inplace=True)
+                    try:
+                        all_coords = pd.DataFrame.from_records(t.coords.read())
 
-                    ax[i].plot(cme_coords['x'], cme_coords['y'], '.', color=cmap(norm(frame_count)))
-                    ax[i].plot(all_coords['x'], all_coords['y'], 'o', color=cmap(norm(frame_count)))
+                        cme_coords = pd.DataFrame.from_records(t.cme_coords.read())
+                        cme_coords.replace(to_replace=[99999], value=np.NaN, inplace=True)
+
+                        ax[i].plot(cme_coords['x'], cme_coords['y'], '.', color=cmap(norm(frame_count)))
+                        ax[i].plot(all_coords['x'], all_coords['y'], 'o', color=cmap(norm(frame_count)))
+                    except:
+                        print("No coords to plot")
 
                 # Label it up and format
                 ax[i].set_title("Tracked in {0} {1} image".format(craft_k, img_k))
@@ -771,15 +893,15 @@ def test_animation():
             norm = mpl.colors.Normalize(vmin=0, vmax=len(diff_times._v_groups))
             cmap = mpl.cm.viridis
             for frame_count, (norm_t, diff_t) in enumerate(zip(norm_times, diff_times)):
-                norm_all = pd.DataFrame.from_records(norm_t.pixel_coords.read())
-                norm_cme = pd.DataFrame.from_records(norm_t.cme_front_pixels.read())
+                norm_all = pd.DataFrame.from_records(norm_t.coords.read())
+                norm_cme = pd.DataFrame.from_records(norm_t.cme_coords.read())
                 norm_cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
 
                 ax[0].plot(norm_cme['x'], norm_cme['y'], '.', color=cmap(norm(frame_count)))
                 ax[0].plot(norm_all['x'], norm_all['y'], 'o', color=cmap(norm(frame_count)), alpha=0.5)
 
-                diff_all = pd.DataFrame.from_records(diff_t.pixel_coords.read())
-                diff_cme = pd.DataFrame.from_records(diff_t.cme_front_pixels.read())
+                diff_all = pd.DataFrame.from_records(diff_t.coords.read())
+                diff_cme = pd.DataFrame.from_records(diff_t.cme_coords.read())
                 diff_cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
 
                 ax[1].plot(diff_cme['x'], diff_cme['y'], '.', color=cmap(norm(frame_count)))
@@ -838,6 +960,7 @@ def test_front_reconstruction():
         ssw_num = int(event._v_name.split('_')[1])
 
         for craft in event:
+            print craft._v_name
 
             if craft._v_name == 'sta':
                 t_start = swpc_cmes.loc[ssw_num, 't_hi1a_start']
@@ -868,19 +991,24 @@ def test_front_reconstruction():
                     fig,ax = plt.subplots()
                     plt.imshow(img, origin='lower')
 
-                    try:
+                    fc_base = os.path.basename(fc)
+                    time_label = "T"+ "_".join(fc_base.split('_')[0:2])
+                    if img_type.__contains__(time_label):
                         # Get the time node for this file.
-                        time_label = hi_map.date.strftime('T%Y%m%d_%H%M%S')
                         time = img_type._f_get_child(time_label)
-                        all = pd.DataFrame.from_records(time.pixel_coords.read())
-                        cme = pd.DataFrame.from_records(time.cme_front_pixels.read())
+                        all = pd.DataFrame.from_records(time.coords.read())
+                        all.replace(to_replace=[99999], value=np.NaN, inplace=True)
+                        cme = pd.DataFrame.from_records(time.cme_coords.read())
                         cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
                         plt.plot(cme['x'], cme['y'], '.', color='r' )
                         plt.plot(all['x'], all['y'], 'o', color='y', alpha=0.5)
-                    except:
-                        print('Bugger')
+                    else:
+                        print('Error in retrieving points')
+                        print time_label
+                        print img_type._v_children.keys()
 
-                    plt.xlim(0,1023)
+
+                    plt.xlim(0, 1023)
                     plt.ylim(0, 1023)
                     ax.get_xaxis().set_visible(False)
                     ax.get_yaxis().set_visible(False)

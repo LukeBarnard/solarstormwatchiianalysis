@@ -364,7 +364,12 @@ def convert_hpc_to_hpr(lon, lat):
     top = -np.cos(lat) * np.sin(lon)
     pa = np.arctan2(top, btm)
     # Correct eastern longitudes so pa runs from 0>2pi, rather than 0>pi.
-    pa[lon >= 0] += 2 * np.pi
+    if isinstance(pa, np.float):
+        if lon >= 0:
+            pa += 2 * np.pi
+    else:
+        pa[lon >= 0] += 2 * np.pi
+
     # Put it back into degs
     el = np.rad2deg(el) * u.deg
     pa = np.rad2deg(pa) * u.deg
