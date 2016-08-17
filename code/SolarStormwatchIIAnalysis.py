@@ -352,6 +352,10 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
     class CMECoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
+        x_lo = tables.Int32Col()  # 32-bit integer
+        y_lo = tables.Int32Col()  # 32-bit integer
+        x_hi = tables.Int32Col()  # 32-bit integer
+        y_hi = tables.Int32Col()  # 32-bit integer
         pa = tables.Float32Col()  # 32-bit float
         el = tables.Float32Col()  # 32-bit float
         el_lo = tables.Float32Col()  # 32-bit float
@@ -361,9 +365,6 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
     # Group structure: Event> Craft> Img type> All classifications> User classifications
     for event_key, craft in event_tree.iteritems():
         event_group = ssw_out.create_group("/", event_key, event_key)
-        print "Processing event {}".format(event_key)
-        if event_key != 'ssw_008':
-            continue
 
         for craft_key, im_type in craft.iteritems():
             craft_group = ssw_out.create_group(event_group, craft_key, craft_key)
@@ -489,10 +490,6 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                         # Now use kernal density estimation to identify pixel coordinates of the CME front.
                         cme_coords = kernel_estimate_cme_front(pix_coords, hpr_coords, asset_hi_map, kernel="epanechnikov", bandwidth=40,
                                                                thresh=10)
-                        if len(cme_coords)==0:
-                            # Set invalid values
-                            cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'el': 99999, 'pa': 99999,
-                                                       'el_lo': 99999, 'el_hi': 99999}, index=[0])
 
                         # Now store the CME front coords: Get table and pointer
                         table = ssw_out.create_table(asset_group, 'cme_coords', CMECoords,expectedrows=len(cme_coords),
@@ -502,7 +499,12 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                         for idr, cme_row in cme_coords.iterrows():
                             coord['x'] = np.int(cme_row['x'])
                             coord['y'] = np.int(cme_row['y'])
+                            coord['x_lo'] = np.int(cme_row['x_lo'])
+                            coord['y_lo'] = np.int(cme_row['y_lo'])
+                            coord['x_hi'] = np.int(cme_row['x_hi'])
+                            coord['y_hi'] = np.int(cme_row['y_hi'])
                             coord['pa'] = np.float32(cme_row['pa'])
+                            coord['el'] = np.float32(cme_row['el'])
                             coord['el_lo'] = np.float32(cme_row['el_lo'])
                             coord['el_hi'] = np.float32(cme_row['el_hi'])
                             coord.append()
@@ -561,6 +563,10 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
     class CMECoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
+        x_lo = tables.Int32Col()  # 32-bit integer
+        y_lo = tables.Int32Col()  # 32-bit integer
+        x_hi = tables.Int32Col()  # 32-bit integer
+        y_hi = tables.Int32Col()  # 32-bit integer
         el = tables.Float32Col()  # 32-bit float
         pa = tables.Float32Col()  # 32-bit float
 
@@ -801,7 +807,10 @@ def kernel_estimate_cme_front(pix_coords, hpr_coords, hi_map, kernel="epanechnik
     # Parse classification cloud to kernel density estimator. Returns log of density.
     xy = np.vstack([pix_coords['x'].values.ravel(), pix_coords['y'].values.ravel()]).T
     hpr = np.vstack([hpr_coords['pa'].values.ravel(), hpr_coords['el'].values.ravel()]).T
+    # Get flags for aborting the CME fit distributions
     fit_distribution = True
+    fit_cme_distribution = True
+
     if xy.shape[0] == 0:
         fit_distribution = False
 
@@ -838,7 +847,7 @@ def kernel_estimate_cme_front(pix_coords, hpr_coords, hi_map, kernel="epanechnik
         xy_in_cme = xy[in_blob]
         hpr_in_cme = hpr[in_blob]
         # Now fit only these points
-        fit_cme_distribution = True
+        # Are there any points left?
         if xy_in_cme.shape[0] == 0:
             fit_cme_distribution = False
 
@@ -863,21 +872,28 @@ def kernel_estimate_cme_front(pix_coords, hpr_coords, hi_map, kernel="epanechnik
                 cme_el_lo[i], cme_el_peak[i], cme_el_hi[i] = get_fwhm(el_pa, pdf_pa)
 
             if len(cme_el_peak) != 0:
-                cme_x, cme_y = hip.convert_hpr_to_pix(cme_el_peak*u.deg, pa_vals*u.deg, hi_map)
-                cme_x = cme_x.value
-                cme_y = cme_y.value
+                x, y = hip.convert_hpr_to_pix(cme_el_peak * u.deg, pa_vals * u.deg, hi_map)
+                x_lo, y_lo = hip.convert_hpr_to_pix(cme_el_lo * u.deg, pa_vals * u.deg, hi_map)
+                x_hi, y_hi = hip.convert_hpr_to_pix(cme_el_hi * u.deg, pa_vals * u.deg, hi_map)
                 # Setup output dataframe
-                cme_coords = pd.DataFrame({'x': cme_x, 'y': cme_y, 'pa': pa_vals, 'el': cme_el_peak,
+                cme_coords = pd.DataFrame({'x': x.value, 'y': y.value,
+                                           'x_lo': x_lo.value, 'y_lo': y_lo.value,
+                                           'x_hi': x_hi.value, 'y_hi': y_hi.value,
+                                           'pa': pa_vals, 'el': cme_el_peak,
                                            'el_lo': cme_el_lo, 'el_hi': cme_el_hi})
+
+                # Check any NaNs are set to bad val
+                cme_coords[cme_coords.isnull()] = 99999
             else:
-                cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'pa': 99999, 'el': 99999,
-                                           'el_lo': 99999, 'el_hi': 99999}, index=[0])
+                fit_cme_distribution = False
 
     # Handle bad values case
-    if fit_distribution or fit_cme_distribution:
+    if (not fit_distribution) or (not fit_cme_distribution):
         # Set bad values to 99999, as pytables can't handle NaN
-        cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'pa': 99999, 'el': 99999,
-                                   'el_lo': 99999, 'el_hi': 99999}, index=[0])
+        bad_val = 99999
+        keys = ['x', 'y', 'x_lo', 'y_lo', 'x_hi', 'y_hi', 'pa', 'el', 'el_lo', 'el_hi']
+        bad_val_dict = {k:bad_val for k in keys}
+        cme_coords = pd.DataFrame(bad_val_dict, index=[0])
 
     return cme_coords
 
@@ -888,7 +904,7 @@ def test_plot():
     :return:
     """
     project_dirs = get_project_dirs()
-    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events_plus_HPR.hdf5')
 
     # Load in the event tree dictionary to easily iterate over the events/craft/img type
     ssw_event_tree = get_event_subject_tree(active=True)
@@ -919,9 +935,8 @@ def test_plot():
 
                         cme_coords = pd.DataFrame.from_records(t.cme_coords.read())
                         cme_coords.replace(to_replace=[99999], value=np.NaN, inplace=True)
-
-                        ax[i].plot(cme_coords['x'], cme_coords['y'], '.', color=cmap(norm(frame_count)))
-                        ax[i].plot(all_coords['x'], all_coords['y'], 'o', color=cmap(norm(frame_count)))
+                        ax[i].plot(cme_coords['x'], cme_coords['y'], '-', color=cmap(norm(frame_count)), linewidth=2)
+                        ax[i].plot(all_coords['x'], all_coords['y'], 'o', color=cmap(norm(frame_count)), alpha=0.5)
                     except:
                         print("No coords to plot")
 
@@ -944,7 +959,7 @@ def test_animation():
     :return:
     """
     project_dirs = get_project_dirs()
-    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events_plus_HPR.hdf5')
 
     # Load in the event tree dictionary to easily iterate over the events/craft/img type
     ssw_event_tree = get_event_subject_tree(active=True)
@@ -974,14 +989,14 @@ def test_animation():
                 norm_cme = pd.DataFrame.from_records(norm_t.cme_coords.read())
                 norm_cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
 
-                ax[0].plot(norm_cme['x'], norm_cme['y'], '.', color=cmap(norm(frame_count)))
+                ax[0].plot(norm_cme['x'], norm_cme['y'], '-', color=cmap(norm(frame_count)), linewidth=2)
                 ax[0].plot(norm_all['x'], norm_all['y'], 'o', color=cmap(norm(frame_count)), alpha=0.5)
 
                 diff_all = pd.DataFrame.from_records(diff_t.coords.read())
                 diff_cme = pd.DataFrame.from_records(diff_t.cme_coords.read())
                 diff_cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
 
-                ax[1].plot(diff_cme['x'], diff_cme['y'], '.', color=cmap(norm(frame_count)))
+                ax[1].plot(diff_cme['x'], diff_cme['y'], '-', color=cmap(norm(frame_count)))
                 ax[1].plot(diff_all['x'], diff_all['y'], 'o', color=cmap(norm(frame_count)), alpha=0.5)
 
                 # Label it up and format
@@ -1022,7 +1037,7 @@ def test_front_reconstruction():
     swpc_cmes = load_swpc_events()
 
     # Import the SSW classifications data
-    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events.hdf5')
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events_plus_HPR.hdf5')
     ssw_out = tables.open_file(ssw_out_name, mode="r")
 
     # Make a directory to store all of these figures in
@@ -1077,13 +1092,18 @@ def test_front_reconstruction():
                         all.replace(to_replace=[99999], value=np.NaN, inplace=True)
                         cme = pd.DataFrame.from_records(time.cme_coords.read())
                         cme.replace(to_replace=[99999], value=np.NaN, inplace=True)
-                        plt.plot(cme['x'], cme['y'], '.', color='r' )
+
+                        # Add on all classifications
                         plt.plot(all['x'], all['y'], 'o', color='y', alpha=0.5)
+                        # Add on CME front and error
+                        plt.plot(cme['x'], cme['y'], '-', color='r', linewidth=2 )
+                        plt.plot(cme['x_lo'], cme['y_lo'], '--', color='r', linewidth=2)
+                        plt.plot(cme['x_hi'], cme['y_hi'], '--', color='r', linewidth=2)
+
                     else:
                         print('Error in retrieving points')
                         print time_label
                         print img_type._v_children.keys()
-
 
                     plt.xlim(0, 1023)
                     plt.ylim(0, 1023)
