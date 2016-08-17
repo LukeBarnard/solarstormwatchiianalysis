@@ -430,7 +430,7 @@ def convert_hpr_to_pix(el, pa, himap):
     :return y: Array of y-pixel coordinates. Should have astropy unit of pixels.
     """
     # TODO: Checks for inputs.
-    lon, lat = convert_hpc_to_hpr(el, pa)
+    lon, lat = convert_hpr_to_hpc(el, pa)
     x, y = himap.data_to_pixel(lon, lat)
     return x, y
 

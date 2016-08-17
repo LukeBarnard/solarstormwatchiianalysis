@@ -325,7 +325,7 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
 
     # Setup the HDF5 data file.
     # Clear it out if it already exists:
-    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events_test.hdf5')
+    ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events_plus_HPR.hdf5')
     if os.path.exists(ssw_out_name):
         os.remove(ssw_out_name)
 
@@ -352,14 +352,18 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
     class CMECoords(tables.IsDescription):
         x = tables.Int32Col()  # 32-bit integer
         y = tables.Int32Col()  # 32-bit integer
-        el = tables.Float32Col()  # 32-bit float
         pa = tables.Float32Col()  # 32-bit float
+        el = tables.Float32Col()  # 32-bit float
+        el_lo = tables.Float32Col()  # 32-bit float
+        el_hi = tables.Float32Col()  # 32-bit float
 
     # Loop through the event tree, making relevant groups in the ssw_out file.
     # Group structure: Event> Craft> Img type> All classifications> User classifications
     for event_key, craft in event_tree.iteritems():
         event_group = ssw_out.create_group("/", event_key, event_key)
         print "Processing event {}".format(event_key)
+        if event_key != 'ssw_008':
+            continue
 
         for craft_key, im_type in craft.iteritems():
             craft_group = ssw_out.create_group(event_group, craft_key, craft_key)
@@ -394,6 +398,8 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                                 hhmmss = file_parts[7][0:2] + '4901'
 
                         time_string = "T" + "_".join([file_parts[6], hhmmss])
+                        label = "_".join([event_key,craft_key,im_key,time_string])
+                        print label
                         asset_time = pd.datetime.strptime(time_string, 'T%Y%m%d_%H%M%S')
 
                         # Get the HI file and sunpy map for this asset
@@ -478,19 +484,15 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                         # Write to file.
                         table.flush()
 
-                        coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
+                        pix_coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
+                        hpr_coords = pd.DataFrame({'el': all_hpr_el, 'pa': all_hpr_pa})
                         # Now use kernal density estimation to identify pixel coordinates of the CME front.
-                        cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40,
+                        cme_coords = kernel_estimate_cme_front(pix_coords, hpr_coords, asset_hi_map, kernel="epanechnikov", bandwidth=40,
                                                                thresh=10)
-                        if len(cme_coords)>0:
-                            # Also get the HPR coords of CME front.
-                            el, pa = hip.convert_pix_to_hpr(cme_coords['x'].values*u.pix, cme_coords['y'].values*u.pix,
-                                                            asset_hi_map)
-                            cme_coords['el'] = el.value
-                            cme_coords['pa'] = pa.value
-                        else:
+                        if len(cme_coords)==0:
                             # Set invalid values
-                            cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'el': 99999, 'pa': 99999}, index=[0])
+                            cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'el': 99999, 'pa': 99999,
+                                                       'el_lo': 99999, 'el_hi': 99999}, index=[0])
 
                         # Now store the CME front coords: Get table and pointer
                         table = ssw_out.create_table(asset_group, 'cme_coords', CMECoords,expectedrows=len(cme_coords),
@@ -500,8 +502,9 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
                         for idr, cme_row in cme_coords.iterrows():
                             coord['x'] = np.int(cme_row['x'])
                             coord['y'] = np.int(cme_row['y'])
-                            coord['el'] = np.float32(cme_row['el'])
                             coord['pa'] = np.float32(cme_row['pa'])
+                            coord['el_lo'] = np.float32(cme_row['el_lo'])
+                            coord['el_hi'] = np.float32(cme_row['el_hi'])
                             coord.append()
                         # Write to file.
                         table.flush()
@@ -685,7 +688,7 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
 
                         coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
                         # Now use kernal density estimation to identify pixel coordinates of the CME front.
-                        cme_coords = kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40,
+                        cme_coords = kernel_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40,
                                                                thresh=10)
                         if len(cme_coords)>0:
                             # Also get the HPR coords of CME front.
@@ -713,19 +716,62 @@ def match_user_classifications_to_ssw_events(username, active=True, latest=True)
     ssw_out.close()
 
 
-def kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thresh=10):
+def get_fwhm(x, pdf):
     """
-    A function that uses Kernal density estimation and skeletonization to estimate the CME front location from the
+    Function to calculate the full width at half maximum of a 1-d distribution.
+    :param x:
+    :param pdf:
+    :return:
+    """
+
+    #Calc FWHM
+    pdf_max = pdf.max()
+    pdf_hm = pdf_max/2.0
+    id_max = np.argwhere(pdf==pdf_max).ravel()
+    if len(id_max)>1:
+        id_max = id_max[0]
+    x_max = x[id_max]
+
+    # Look low.
+    pdf_l = pdf[x<x_max]
+    x_l = x[x<x_max]
+    if len(x_l)>1:
+        x_hm_l = x_l[np.argmin(np.abs(pdf_l - pdf_hm))]
+    else:
+        x_hm_l = np.NaN
+
+    # Look high.
+    pdf_h = pdf[x>x_max]
+    x_h = x[x>x_max]
+    if len(x_h)>1:
+        x_hm_h = x_h[np.argmin(np.abs(pdf_h - pdf_hm))]
+    else:
+        x_hm_h = np.NaN
+
+    return x_hm_l, x_max, x_hm_h
+
+
+def kernel_estimate_cme_front(pix_coords, hpr_coords, hi_map, kernel="epanechnikov", bandwidth=40, thresh=10):
+    """
+    A function that uses Kernel density estimation and skeletonization to estimate the CME front location from the
     cloud of classifications for this asset.
-    :param coords: Dataframe of classification coordinates, with columns 'x', and 'y' for the x pixels and y pixels.
+    :param pix_coords: Dataframe of classification coordinates, with columns 'x', and 'y' for the x pixels and y pixels.
+    :param hpr_coords: Dataframe of classification coordinates, with columns 'pa', and 'el' for the pixel coords in HPR.
+    :param hi_map: A sunpy map of the HI image current being analysed.
     :param kernel: String name of any valid kernal in scikit-learn.neighbours.KernalDensity.
     :param bandwidth: Float value of the bandwidth to be used by the kernal. Defaults to 40 pixels, as this is
                       approximately the error in classifications if made using a touchscreen.
     :param thresh: Float value of threshold to apply to the density map to identify the CME skeleton. Defaults to 10,
                    but this is only from playing around and hasn't been thoroughly testted.
-    :return: coords: A dataframe with columns 'x' and 'y', identifying to skeleton of the classifications distribution.
+    :return: coords: A dataframe with columns:
+                     x: x-pixel coords of the best estimate of the cme front
+                     y: y-pixel coords of the best estimate of the cme front
+                     pa:
+                     el:
+                     el_lo:
+                     el_hi:
     """
-    if coords.shape[0] < 20:
+    if pix_coords.shape[0] < 20:
         print("Error: <20 coordinates provided, CME front identification likely to be poor")
 
     if kernel not in {"gaussian", "tophat", "epanechnikov", "exponential", "linear", "cosine"}:
@@ -744,15 +790,23 @@ def kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thres
     x = np.arange(0, 1024)
     y = np.arange(0, 1024)
     xm, ym = np.meshgrid(x, y)
+    # Get all coords for KSdensity
     all_coords = np.vstack([xm.ravel(), ym.ravel()]).T
+    # Lookup HPR coords in frame
+    elm, pam = hip.convert_pix_to_hpr(xm*u.pix, ym*u.pix, hi_map)
+    # Loose the units as not needed
+    elm = elm.value
+    pam = pam.value
 
     # Parse classification cloud to kernel density estimator. Returns log of density.
-    xy = np.vstack([coords['x'].values.ravel(), coords['y'].values.ravel()]).T
+    xy = np.vstack([pix_coords['x'].values.ravel(), pix_coords['y'].values.ravel()]).T
+    hpr = np.vstack([hpr_coords['pa'].values.ravel(), hpr_coords['el'].values.ravel()]).T
     fit_distribution = True
     if xy.shape[0] == 0:
         fit_distribution = False
 
     if fit_distribution:
+        # Use first stab at kernel density to
         kde = KernelDensity(kernel=kernel, bandwidth=bandwidth).fit(xy)
         log_pdf = np.reshape(kde.score_samples(all_coords), xm.shape)
         # Convert the pdf to a binary map of where the distribution is > np.max(dist)/thresh
@@ -777,15 +831,55 @@ def kernal_estimate_cme_front(coords, kernel="epanechnikov", bandwidth=40, thres
 
         # Set the largest blob back to 1 rather than it's label.
         pdf_binary_label[pdf_binary_label != 0] = 1
-        # Use scikit-image skeletonize to get skeleton of the binary map, get pixel coordinates and output to dataframe
-        skel = skeletonize(pdf_binary_label)
-        cme_coords = np.nonzero(skel)
-        cme_coords_df = pd.DataFrame({'x':cme_coords[1], 'y':cme_coords[0]})
-    else:
-        # Set bad values to 99999, as pytables can't handle NaN
-        cme_coords_df = pd.DataFrame({'x': 99999, 'y': 99999}, index=[0])
+        # Get the edge of this CME blob
+        edge_coords = np.fliplr(measure.find_contours(pdf_binary_label,0)[0])
+        # Find classifications inside this polygon
+        in_blob = measure.points_in_poly(xy, edge_coords)
+        xy_in_cme = xy[in_blob]
+        hpr_in_cme = hpr[in_blob]
+        # Now fit only these points
+        fit_cme_distribution = True
+        if xy_in_cme.shape[0] == 0:
+            fit_cme_distribution = False
 
-    return cme_coords_df
+        if fit_cme_distribution:
+            kde = KernelDensity(kernel=kernel, bandwidth=bandwidth).fit(xy_in_cme)
+            log_pdf = np.reshape(kde.score_samples(all_coords), xm.shape)
+            cme_pdf = np.exp(log_pdf.copy())
+
+            # Use classifications to find range of PA values to look up CME elongation for. Preallocate space for CME front
+            pa_vals = np.arange(np.round(hpr_in_cme[:,0].min()), np.round(hpr_in_cme[:,0].max()), 1)
+            cme_el_peak = np.zeros(pa_vals.shape)
+            cme_el_lo = np.zeros(pa_vals.shape)
+            cme_el_hi = np.zeros(pa_vals.shape)
+            # Loop over position angles, get FWHM of the kernel density estimate along constant PA. Use as elon error est.
+            for i, pa in enumerate(pa_vals):
+                # Get pixel coords of this PA slice
+                pa_slice = measure.find_contours(pam,pa)[0]
+                # Get values rounded to nearest pixel
+                pa_slice = pa_slice.astype(int)
+                pdf_pa = cme_pdf[pa_slice[:, 0], pa_slice[:, 1]]
+                el_pa = elm[pa_slice[:, 0], pa_slice[:, 1]]
+                cme_el_lo[i], cme_el_peak[i], cme_el_hi[i] = get_fwhm(el_pa, pdf_pa)
+
+            if len(cme_el_peak) != 0:
+                cme_x, cme_y = hip.convert_hpr_to_pix(cme_el_peak*u.deg, pa_vals*u.deg, hi_map)
+                cme_x = cme_x.value
+                cme_y = cme_y.value
+                # Setup output dataframe
+                cme_coords = pd.DataFrame({'x': cme_x, 'y': cme_y, 'pa': pa_vals, 'el': cme_el_peak,
+                                           'el_lo': cme_el_lo, 'el_hi': cme_el_hi})
+            else:
+                cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'pa': 99999, 'el': 99999,
+                                           'el_lo': 99999, 'el_hi': 99999}, index=[0])
+
+    # Handle bad values case
+    if fit_distribution or fit_cme_distribution:
+        # Set bad values to 99999, as pytables can't handle NaN
+        cme_coords = pd.DataFrame({'x': 99999, 'y': 99999, 'pa': 99999, 'el': 99999,
+                                   'el_lo': 99999, 'el_hi': 99999}, index=[0])
+
+    return cme_coords
 
 
 def test_plot():
