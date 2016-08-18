@@ -799,14 +799,13 @@ def kernel_estimate_cme_front(pix_coords, hpr_coords, hi_map, kernel="epanechnik
     # Get all coords for KSdensity
     all_coords = np.vstack([xm.ravel(), ym.ravel()]).T
     # Lookup HPR coords in frame
-    elm, pam = hip.convert_pix_to_hpr(xm*u.pix, ym*u.pix, hi_map)
+    elm, pam = hip.convert_pix_to_hpr(xm * u.pix, ym * u.pix, hi_map)
     # Loose the units as not needed
     elm = elm.value
     pam = pam.value
 
     # Parse classification cloud to kernel density estimator. Returns log of density.
     xy = np.vstack([pix_coords['x'].values.ravel(), pix_coords['y'].values.ravel()]).T
-    hpr = np.vstack([hpr_coords['pa'].values.ravel(), hpr_coords['el'].values.ravel()]).T
     # Get flags for aborting the CME fit distributions
     fit_distribution = True
     fit_cme_distribution = True
@@ -840,12 +839,29 @@ def kernel_estimate_cme_front(pix_coords, hpr_coords, hi_map, kernel="epanechnik
 
         # Set the largest blob back to 1 rather than it's label.
         pdf_binary_label[pdf_binary_label != 0] = 1
-        # Get the edge of this CME blob
-        edge_coords = np.fliplr(measure.find_contours(pdf_binary_label,0)[0])
+
         # Find classifications inside this polygon
-        in_blob = measure.points_in_poly(xy, edge_coords)
-        xy_in_cme = xy[in_blob]
-        hpr_in_cme = hpr[in_blob]
+        id_keep = []
+        for idr, row in pix_coords.iterrows():
+            good_row = True
+            if (row['y'] < 0) | (row['y'] > 1023):
+                print "row: {0}, y : {1}".format(idr, row['y'])
+                good_row = False
+            if (row['x'] < 0) | (row['x'] > 1023):
+                print "row: {0}, x : {1}".format(idr, row['x'])
+                good_row = False
+
+            if good_row:
+                if pdf_binary_label[int(row['y']), int(row['x'])] == 1:
+                    id_keep.append(True)
+                else:
+                    id_keep.append(False)
+            else:
+                id_keep.append(False)
+
+        xy_in_cme = np.vstack([pix_coords['x'][id_keep].values.ravel(), pix_coords['y'][id_keep].values.ravel()]).T
+        hpr_in_cme = np.vstack([hpr_coords['pa'][id_keep].values.ravel(), hpr_coords['el'][id_keep].values.ravel()]).T
+
         # Now fit only these points
         # Are there any points left?
         if xy_in_cme.shape[0] == 0:
