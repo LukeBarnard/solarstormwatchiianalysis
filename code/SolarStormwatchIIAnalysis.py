@@ -2,17 +2,14 @@ import glob
 import os
 import tables
 import astropy.units as u
-import hi_processing as hip
+import hi_processing.images as hip
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import simplejson as json
 from sklearn.neighbors import KernelDensity
-from skimage.morphology import skeletonize
-import skimage.morphology as morph
 from skimage import measure
-import scipy.ndimage as ndimage
 
 def get_project_dirs():
     """
@@ -305,10 +302,54 @@ def get_event_subject_tree(active=True):
 
     return event_tree
 
+def test_out_of_range():
+    project_dirs = get_project_dirs()
+
+    # Get classifications from latest workflow
+    classifications = import_classifications(latest=True)
+    x_lo = 0
+    x_hi = 0
+    y_lo = 0
+    y_hi = 0
+    tot_bad = 0
+    bad_clas = []
+    store_id = []
+    for idc, cla in classifications.iterrows():
+        # Loop through values and find value with frame matching asset index
+        for val in cla['annotations']['value']:
+                # Get the pixel coordinates
+                x_pix = np.array([int(p['x']) for p in val['points']])
+                y_pix = np.array([1023 - int(p['y']) for p in val['points']])
+                if any((x_pix<0)):
+                    x_lo += 1
+                if any((x_pix>1024)):
+                    x_hi += 1
+                if any((y_pix<0)):
+                    y_lo += 1
+                if any((y_pix>1024)):
+                    y_hi += 1
+                if any((x_pix < 0)) | any((x_pix>1024)) | any((y_pix<0)) | any((y_pix>1024)):
+                    tot_bad +=1
+                    bad_clas.append([x_pix, y_pix])
+                    store_id.append(idc)
+
+    print "x_lo: {}".format(x_lo)
+    print "x_hi: {}".format(x_hi)
+    print "y_lo: {}".format(y_lo)
+    print "y_hi: {}".format(y_hi)
+    print "Total number of Classifications with bad points: {}".format(tot_bad)
+    print "Total number of Classifications: {}".format(idc)
+    i = 0
+    while i < 10:
+        print store_id[i]
+        print bad_clas[i][0]
+        print bad_clas[i][1]
+        print "***************************"
+        i += 1
 
 def match_all_classifications_to_ssw_events(active=True, latest=True):
     """
-    A function to process the Solar Stormwatch subjects to create a HDF5 data structure containing linking each
+    A function to process the Solar Stormwatch subjects to create a HDF5 data structure linking each
     classification with it's corresponding frame.
     :param active: Bool, If true only processes subjects currently assigned to a workflow.
     :param latest: Bool, If true only processes classifications from the latest version of the workflow
@@ -364,12 +405,15 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
     # Loop through the event tree, making relevant groups in the ssw_out file.
     # Group structure: Event> Craft> Img type> All classifications> User classifications
     for event_key, craft in event_tree.iteritems():
+
         event_group = ssw_out.create_group("/", event_key, event_key)
 
         for craft_key, im_type in craft.iteritems():
+
             craft_group = ssw_out.create_group(event_group, craft_key, craft_key)
 
             for im_key, subjects in im_type.iteritems():
+
                 im_group = ssw_out.create_group(craft_group, im_key, im_key)
 
                 for sub in subjects:
@@ -487,6 +531,7 @@ def match_all_classifications_to_ssw_events(active=True, latest=True):
 
                         pix_coords = pd.DataFrame({'x': all_x_pix, 'y': all_y_pix})
                         hpr_coords = pd.DataFrame({'el': all_hpr_el, 'pa': all_hpr_pa})
+
                         # Now use kernal density estimation to identify pixel coordinates of the CME front.
                         cme_coords = kernel_estimate_cme_front(pix_coords, hpr_coords, asset_hi_map, kernel="epanechnikov", bandwidth=40,
                                                                thresh=10)
@@ -872,12 +917,15 @@ def kernel_estimate_cme_front(pix_coords, hpr_coords, hi_map, kernel="epanechnik
             log_pdf = np.reshape(kde.score_samples(all_coords), xm.shape)
             cme_pdf = np.exp(log_pdf.copy())
 
-            # Use classifications to find range of PA values to look up CME elongation for. Preallocate space for CME front
-            pa_vals = np.arange(np.round(hpr_in_cme[:,0].min()), np.round(hpr_in_cme[:,0].max()), 1)
+            # Use classifications to find range of PA values to look up CME elongation for.
+            # Preallocate space for CME front.
+            # Use ceil and floor so that pa_vals definitely stays in range.
+            pa_vals = np.arange(np.ceil(hpr_in_cme[:,0].min()), np.floor(hpr_in_cme[:,0].max()), 1)
             cme_el_peak = np.zeros(pa_vals.shape)
             cme_el_lo = np.zeros(pa_vals.shape)
             cme_el_hi = np.zeros(pa_vals.shape)
-            # Loop over position angles, get FWHM of the kernel density estimate along constant PA. Use as elon error est.
+            # Loop over position angles, get FWHM of the kernel density estimate along constant PA.
+            # Use FWHM as elon error est.
             for i, pa in enumerate(pa_vals):
                 # Get pixel coords of this PA slice
                 pa_slice = measure.find_contours(pam,pa)[0]
