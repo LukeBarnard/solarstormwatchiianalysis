@@ -62,7 +62,7 @@ def load_swpc_events():
                    t_hi1b_stop=pd.to_datetime, diff=str)
 
     swpc_cmes = pd.read_excel(proj_dirs['swpc_data'], header=0, index_col=None, converters=convert)
-    #swpc_cmes['diff'] = pd.to_timedelta(swpc_cmes['diff'], unit='h')
+    swpc_cmes['diff'] = pd.to_timedelta(swpc_cmes['diff'], unit='h')
     return swpc_cmes
 
 def import_classifications(latest=True, version=None):
@@ -973,20 +973,20 @@ def test_plot():
     ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events_plus_HPR.hdf5')
 
     # Load in the event tree dictionary to easily iterate over the events/craft/img type
-    ssw_event_tree = get_event_subject_tree(active=False)
+    ssw_event_tree = get_event_subject_tree(active=True)
 
     # get handle to the ssw out data
     ssw_out = tables.open_file(ssw_out_name, mode="r")
 
     # Loop over events, craft and image type
-    for event_k, event in ssw_event_tree.items():
+    for event_k, event in ssw_event_tree.iteritems():
 
-        for craft_k, craft in event.items():
+        for craft_k, craft in event.iteritems():
 
             # Make a plot for each image type.
             fig, ax = plt.subplots(1, 2, figsize=(15, 7))
 
-            for i, img_k in enumerate(list(craft.keys())):
+            for i, img_k in enumerate(craft.iterkeys()):
 
                 # Get path to this node of the data, pull out the group of times
                 path = "/".join(['', event_k, craft_k, img_k])
@@ -1014,7 +1014,7 @@ def test_plot():
 
             # Save and move to next plot
             plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-            name = os.path.join(project_dirs['figs'], "_".join([event_k, craft_k, 'test.png']))
+            name = os.path.join(project_dirs['figs'], "_".join([event_k, craft_k, 'test.jpg']))
             plt.savefig(name)
             plt.close('all')
 
@@ -1028,15 +1028,15 @@ def test_animation():
     ssw_out_name = os.path.join(project_dirs['out_data'], 'all_classifications_matched_ssw_events_plus_HPR.hdf5')
 
     # Load in the event tree dictionary to easily iterate over the events/craft/img type
-    ssw_event_tree = get_event_subject_tree(active=False)
+    ssw_event_tree = get_event_subject_tree(active=True)
 
     # get handle to the ssw out data
     ssw_out = tables.open_file(ssw_out_name, mode="r")
 
     # Loop over events and craft
-    for event_k, event in ssw_event_tree.items():
+    for event_k, event in ssw_event_tree.iteritems():
 
-        for craft_k, craft in event.items():
+        for craft_k, craft in event.iteritems():
             # Make a plot for each image type.
             fig, ax = plt.subplots(1, 2, figsize=(15, 7))
 
@@ -1074,7 +1074,7 @@ def test_animation():
 
                 # Save and move to next plot
                 plt.subplots_adjust(left=0.05, bottom=0.05, right=0.98, top=0.92, wspace=0.075)
-                name = "_".join([event_k,  craft_k, "ani_f{0:03d}.png".format(frame_count)])
+                name = "_".join([event_k,  craft_k, "ani_f{0:03d}.jpg".format(frame_count)])
                 name = os.path.join(project_dirs['figs'], name)
                 plt.savefig(name)
 
@@ -1082,7 +1082,7 @@ def test_animation():
 
         # Make animation and clean up.
         for craft in ['sta', 'stb']:
-            src = os.path.join(project_dirs['figs'], event_k + "_" + craft + "*_ani*.png")
+            src = os.path.join(project_dirs['figs'], event_k + "_" + craft + "*_ani*.jpg")
             dst = os.path.join(project_dirs['figs'], event_k + "_" + craft + "_front_id_test.gif")
             cmd = " ".join(["convert -delay 0 -loop 0 -resize 50%", src, dst])
             os.system(cmd)
@@ -1176,12 +1176,12 @@ def test_front_reconstruction():
                     ax.get_xaxis().set_visible(False)
                     ax.get_yaxis().set_visible(False)
                     out_name = "_".join([event._v_name, craft._v_name, img_type._v_name,
-                                         hi_map.date.strftime('%Y%m%d_%H%M%S'), 'plus_CME']) + '.png'
+                                         hi_map.date.strftime('%Y%m%d_%H%M%S'), 'plus_CME']) + '.jpg'
                     out_path = os.path.join(fig_out_dir, out_name)
                     plt.savefig(out_path, bbox_inches='tight', pad_inches=0)
                     plt.close('all')
 
-                src = os.path.join(fig_out_dir, '*plus_CME.png')
+                src = os.path.join(fig_out_dir, '*plus_CME.jpg')
                 gif_name = "_".join([event._v_name, craft._v_name, img_type._v_name, 'front_id_test.gif'])
                 dst = os.path.join(fig_out_dir, gif_name)
                 cmd = " ".join(["convert -delay 20 -loop 0 ", src, dst])
